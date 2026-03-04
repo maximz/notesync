@@ -12,10 +12,12 @@ A Python CLI tool inspired by the Granola extension for Raycast, designed for re
 
 ## Features
 
-- **Incremental Sync**: Only exports new or updated notes (configurable with `--force`)
+- **Incremental Sync**: Only exports new or updated notes (configurable with `--force` or `--since`)
 - **Organized Structure**: Preserves Granola's folder hierarchy on disk
 - **Timestamp Filenames**: Uses `YYYYMMDD_HHMM.Title.abc12345.md` format for chronological sorting
 - **Complete Export**: Includes user notes, AI-generated panels (summaries, action items), and transcripts
+- **Attendee Information**: Exports meeting attendees with names, emails, titles, companies, and LinkedIn profiles
+- **Smart Re-sync**: Automatically re-exports recently ended meetings to capture complete transcripts
 - **Efficient**: Tracks sync state in SQLite to avoid unnecessary re-exports
 - **Progress Tracking**: Rich terminal progress output with status updates
 
@@ -105,6 +107,7 @@ notesync sync [OPTIONS] OUTPUT_DIR
 
 **Options:**
 - `--force`: Re-export all notes, ignoring sync state (overwrites existing files)
+- `--since N`: Force re-export notes updated in the last N days (e.g., `--since 7` for last week)
 - `--dry-run`: Show what would be synced without actually writing files
 - `--verbose`, `-v`: Show detailed logging for each note
 
@@ -119,6 +122,9 @@ uv run notesync sync ~/Dropbox/notesync_notes
 
 # Force full re-sync
 uv run notesync sync ~/Dropbox/notesync_notes --force
+
+# Re-export notes from the last 7 days
+uv run notesync sync ~/Dropbox/notesync_notes --since 7
 
 # Preview changes
 uv run notesync sync ~/Dropbox/notesync_notes --dry-run
@@ -563,9 +569,16 @@ Each exported note contains:
 ```markdown
 # Meeting Title
 
-**Created:** 2025-10-25T14:30:45.123Z
-**Updated:** 2025-10-25T15:45:12.456Z
-**Source:** macOS
+- **Meeting:** Oct 25, 2025 2:30 PM - 3:45 PM (America/New_York)
+- **Created:** 2025-10-25T14:30:45.123Z
+- **Updated:** 2025-10-25T15:45:12.456Z
+- **Source:** macOS
+
+## Attendees
+
+- **Alice Smith** <alice@example.com> - Engineering Manager, Acme Corp [LinkedIn](https://linkedin.com/in/alicesmith) *(organizer)*
+- **Bob Jones** <bob@example.com> - Product Lead, Acme Corp
+- **Carol Lee** <carol@partner.com> - Director, Partner Inc *(tentative)*
 
 ---
 
@@ -600,6 +613,12 @@ Each exported note contains:
 *Exported from Granola on 2025-11-23 10:30:00*
 ```
 
+Attendee information includes:
+- Names and email addresses
+- Job titles and companies (when available)
+- LinkedIn profiles (when available)
+- Status annotations: *(organizer)*, *(optional)*, *(tentative)*, *(declined)*
+
 ## How It Works
 
 ### Authentication
@@ -617,10 +636,11 @@ The CLI tracks which documents have been synced in a local SQLite database (`.no
 
 1. Fetches all documents from Granola API
 2. Compares `updated_at` timestamps with local sync state
-3. Only exports documents that are new or have been updated
-4. Updates sync state after successful export
+3. Re-syncs meetings that ended recently (to capture complete transcripts)
+4. Only exports documents that are new, updated, or recently ended
+5. Updates sync state after successful export
 
-This makes frequent syncs very efficient.
+This makes frequent syncs very efficient while ensuring transcripts are complete.
 
 ### API Compatibility
 

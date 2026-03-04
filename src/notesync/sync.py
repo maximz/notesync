@@ -4,11 +4,18 @@ Tracks which documents have been synced to avoid re-exporting unchanged notes.
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .models import Document, SyncState
+
+# Buffer time after meeting end to account for transcript processing
+# Re-sync if meeting ended within this buffer after our last sync
+TRANSCRIPT_BUFFER_MINUTES = 30
+
+# Maximum assumed meeting duration for meetings without explicit end time
+MAX_MEETING_HOURS = 5
 
 SYNC_DB_FILENAME = ".notesync-sync.db"
 
@@ -146,6 +153,7 @@ class SyncDatabase:
         - force is True (force re-sync)
         - It's never been synced before
         - Its updated_at timestamp is newer than the last sync
+        - The meeting ended after we last synced it (transcript may have been incomplete)
 
         Args:
             document: The document to check
@@ -164,7 +172,62 @@ class SyncDatabase:
             return True
 
         # Check if document was updated after last sync
-        return sync_state.is_outdated(document.updated_at)
+        if sync_state.is_outdated(document.updated_at):
+            return True
+
+        # Re-sync if meeting ended after (or shortly before) we last synced
+        # This catches transcripts that were still processing when first synced
+        if self._meeting_ended_after_sync(document, sync_state):
+            return True
+
+        return False
+
+    def _meeting_ended_after_sync(self, document: Document, sync_state: SyncState) -> bool:
+        """
+        Check if a meeting ended after we last synced it.
+        Includes a buffer to account for transcript processing delay.
+
+        Uses (in order of preference):
+        1. google_calendar_event.end.dateTime (explicit end time)
+        2. google_calendar_event.start.dateTime + MAX_MEETING_HOURS
+        3. document.created_at + MAX_MEETING_HOURS
+
+        Args:
+            document: The document to check
+            sync_state: The sync state for this document
+
+        Returns:
+            True if meeting ended after (synced_at - buffer), False otherwise
+        """
+        try:
+            synced_at = datetime.fromisoformat(sync_state.synced_at.replace("Z", "+00:00"))
+            cutoff = synced_at - timedelta(minutes=TRANSCRIPT_BUFFER_MINUTES)
+
+            # Try to get end time from calendar event
+            end_dt = None
+            if document.google_calendar_event:
+                end_info = document.google_calendar_event.get("end", {})
+                end_dt_str = end_info.get("dateTime")
+
+                if end_dt_str:
+                    end_dt = datetime.fromisoformat(end_dt_str.replace("Z", "+00:00"))
+                else:
+                    # Fall back to start time + max duration
+                    start_info = document.google_calendar_event.get("start", {})
+                    start_dt_str = start_info.get("dateTime")
+                    if start_dt_str:
+                        start_dt = datetime.fromisoformat(start_dt_str.replace("Z", "+00:00"))
+                        end_dt = start_dt + timedelta(hours=MAX_MEETING_HOURS)
+
+            # Fall back to created_at + max duration
+            if end_dt is None:
+                created_at = datetime.fromisoformat(document.created_at.replace("Z", "+00:00"))
+                end_dt = created_at + timedelta(hours=MAX_MEETING_HOURS)
+
+            # Re-sync if meeting ended after (synced_at - buffer)
+            return end_dt >= cutoff
+        except (ValueError, TypeError):
+            return False
 
     def mark_synced(
         self,

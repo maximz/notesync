@@ -43,6 +43,11 @@ def cli():
     help="Re-export all notes, ignoring sync state (overwrites existing files)",
 )
 @click.option(
+    "--since",
+    type=int,
+    help="Force re-export notes updated in the last N days (e.g., --since 7 for last week)",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     help="Show what would be synced without actually writing files",
@@ -58,7 +63,7 @@ def cli():
     is_flag=True,
     help="Show debug output for markdown conversion",
 )
-def sync(output_dir: Path, force: bool, dry_run: bool, verbose: bool, debug: bool):
+def sync(output_dir: Path, force: bool, since: int, dry_run: bool, verbose: bool, debug: bool):
     """
     Sync Granola notes to a local directory.
 
@@ -77,6 +82,10 @@ def sync(output_dir: Path, force: bool, dry_run: bool, verbose: bool, debug: boo
       \b
       # Force re-export all notes
       notesync sync ~/Documents/notesync-notes --force
+
+      \b
+      # Re-export notes from the last 7 days
+      notesync sync ~/Documents/notesync-notes --since 7
 
       \b
       # Preview what would be synced
@@ -108,6 +117,7 @@ def sync(output_dir: Path, force: bool, dry_run: bool, verbose: bool, debug: boo
             dry_run=dry_run,
             verbose=verbose,
             debug=debug,
+            since=since,
         )
 
         # Exit with success

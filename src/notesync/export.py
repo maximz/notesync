@@ -6,9 +6,9 @@ Orchestrates the export of notes and transcripts to markdown files.
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
@@ -227,6 +227,7 @@ class ExportEngine:
         dry_run: bool = False,
         verbose: bool = False,
         debug: bool = False,
+        since: Optional[Union[datetime, int]] = None,
     ) -> Dict[str, Any]:
         """
         Sync all notes from Granola to disk.
@@ -237,6 +238,7 @@ class ExportEngine:
             force: If True, re-export all notes regardless of sync state
             dry_run: If True, don't actually write files
             verbose: If True, show detailed logging
+            since: If provided, force re-export notes updated since this datetime or N days ago (int)
 
         Returns:
             Dictionary with sync statistics:
@@ -282,16 +284,43 @@ class ExportEngine:
         # Get folder structure
         doc_to_folder = self.get_folder_structure(folders, documents)
 
+        # Handle --since filter: convert int (days) to datetime
+        since_cutoff = None
+        if since is not None:
+            if isinstance(since, int):
+                since_cutoff = datetime.now(timezone.utc) - timedelta(days=since)
+            else:
+                since_cutoff = since
+                # Ensure timezone-aware
+                if since_cutoff.tzinfo is None:
+                    since_cutoff = since_cutoff.replace(tzinfo=timezone.utc)
+
         # Filter documents that need syncing
-        if not force:
+        if since_cutoff is not None:
+            # Filter to docs updated since cutoff, then force re-export those
+            docs_to_sync = []
+            for doc in documents:
+                try:
+                    updated = datetime.fromisoformat(doc.updated_at.replace("Z", "+00:00"))
+                    if updated >= since_cutoff:
+                        docs_to_sync.append(doc)
+                except (ValueError, TypeError):
+                    # If we can't parse the date, include it
+                    docs_to_sync.append(doc)
+
+            console.print(
+                f"[blue]Force re-exporting {len(docs_to_sync)} documents updated since "
+                f"{since_cutoff.strftime('%Y-%m-%d %H:%M')} UTC[/blue]"
+            )
+        elif force:
+            docs_to_sync = documents
+            console.print(f"[blue]Force sync: re-exporting all {len(docs_to_sync)} documents[/blue]")
+        else:
             docs_to_sync = [doc for doc in documents if sync_db.should_sync(doc, force=False)]
             console.print(
                 f"[blue]{len(docs_to_sync)} documents need syncing "
                 f"({len(documents) - len(docs_to_sync)} already up to date)[/blue]"
             )
-        else:
-            docs_to_sync = documents
-            console.print(f"[blue]Force sync: re-exporting all {len(docs_to_sync)} documents[/blue]")
 
         if not docs_to_sync:
             console.print("[green]All documents are already up to date![/green]")

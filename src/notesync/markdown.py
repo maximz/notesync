@@ -5,13 +5,15 @@ Implements behavior compatible with Granola note/panel content formats.
 """
 
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .models import (
+    Attendee,
     ContentNode,
     Document,
     DocumentStructure,
     PanelContent,
+    People,
     TranscriptSegment,
 )
 
@@ -349,6 +351,227 @@ def convert_transcript_to_markdown(segments: List[TranscriptSegment]) -> str:
     return "\n\n".join(result_parts)
 
 
+def format_meeting_time(google_calendar_event: Optional[Dict[str, Any]]) -> Optional[str]:
+    """
+    Format meeting start/end time from Google Calendar event data.
+
+    Args:
+        google_calendar_event: The google_calendar_event dict from the document
+
+    Returns:
+        Formatted time string like "Dec 18, 2025 12:30 PM - 1:00 PM (America/New_York)"
+        or None if no calendar data
+    """
+    if not google_calendar_event:
+        return None
+
+    start = google_calendar_event.get("start", {})
+    end = google_calendar_event.get("end", {})
+
+    start_dt_str = start.get("dateTime")
+    end_dt_str = end.get("dateTime")
+    timezone = start.get("timeZone") or end.get("timeZone")
+
+    if not start_dt_str:
+        return None
+
+    try:
+        # Parse ISO format datetime
+        start_dt = datetime.fromisoformat(start_dt_str.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(end_dt_str.replace("Z", "+00:00")) if end_dt_str else None
+
+        # Format nicely
+        date_str = start_dt.strftime("%b %d, %Y")
+        start_time = start_dt.strftime("%I:%M %p").lstrip("0")
+
+        if end_dt:
+            end_time = end_dt.strftime("%I:%M %p").lstrip("0")
+            time_str = f"{date_str} {start_time} - {end_time}"
+        else:
+            time_str = f"{date_str} {start_time}"
+
+        if timezone:
+            time_str += f" ({timezone})"
+
+        return time_str
+    except (ValueError, TypeError):
+        return None
+
+
+def get_gcal_attendee_info(
+    email: str, google_calendar_event: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Get Google Calendar attendee info (response status, optional flag) by email.
+
+    Args:
+        email: The attendee's email address
+        google_calendar_event: The google_calendar_event dict
+
+    Returns:
+        Dict with responseStatus, optional, organizer, displayName if found
+    """
+    if not google_calendar_event or not email:
+        return {}
+
+    for att in google_calendar_event.get("attendees", []):
+        if att.get("email", "").lower() == email.lower():
+            return {
+                "responseStatus": att.get("responseStatus"),
+                "optional": att.get("optional", False),
+                "organizer": att.get("organizer", False),
+                "displayName": att.get("displayName"),
+            }
+    return {}
+
+
+def format_attendee_line(
+    attendee: Attendee,
+    gcal_info: Dict[str, Any],
+    is_creator: bool = False,
+) -> str:
+    """
+    Format a single attendee as a markdown line.
+
+    Args:
+        attendee: The Attendee object
+        gcal_info: Google Calendar info for this attendee
+        is_creator: Whether this is the meeting creator/organizer
+
+    Returns:
+        Formatted markdown line like "- Name <email> - Title, Company [LinkedIn](url) *(organizer)*"
+    """
+    # Get the best name available
+    name = attendee.name
+    if not name and attendee.details:
+        person = attendee.details.get("person", {})
+        name_info = person.get("name", {})
+        name = name_info.get("fullName")
+    if not name:
+        name = gcal_info.get("displayName")
+    if not name and attendee.email:
+        # Use email username as fallback
+        name = attendee.email.split("@")[0].title()
+
+    # Get company/title
+    company = None
+    title = None
+    linkedin = None
+    twitter = None
+
+    if attendee.details:
+        person = attendee.details.get("person", {})
+        employment = person.get("employment", {})
+        company = employment.get("name") or attendee.details.get("company", {}).get("name")
+        title = employment.get("title")
+
+        # Social links
+        linkedin_info = person.get("linkedin", {})
+        if linkedin_info.get("handle"):
+            handle = linkedin_info["handle"]
+            # Normalize to full URL
+            if not handle.startswith("http"):
+                linkedin = f"https://linkedin.com/{handle}"
+            else:
+                linkedin = handle
+
+        twitter_info = person.get("twitter", {})
+        if twitter_info.get("handle"):
+            handle = twitter_info["handle"]
+            if not handle.startswith("http"):
+                twitter = f"https://twitter.com/{handle.lstrip('@')}"
+            else:
+                twitter = handle
+
+    # Build the line
+    parts = []
+    if name:
+        parts.append(f"**{name}**")
+    if attendee.email:
+        parts.append(f"<{attendee.email}>")
+
+    line = " ".join(parts)
+
+    # Add title/company
+    role_parts = []
+    if title:
+        role_parts.append(title)
+    if company:
+        role_parts.append(company)
+    if role_parts:
+        line += f" - {', '.join(role_parts)}"
+
+    # Add social links
+    social = []
+    if linkedin:
+        social.append(f"[LinkedIn]({linkedin})")
+    if twitter:
+        social.append(f"[Twitter]({twitter})")
+    if social:
+        line += " " + " ".join(social)
+
+    # Add status annotations
+    annotations = []
+    if is_creator or gcal_info.get("organizer"):
+        annotations.append("organizer")
+    if gcal_info.get("optional"):
+        annotations.append("optional")
+
+    response = gcal_info.get("responseStatus")
+    if response == "declined":
+        annotations.append("declined")
+    elif response == "tentative":
+        annotations.append("tentative")
+
+    if annotations:
+        line += f" *({', '.join(annotations)})*"
+
+    return f"- {line}"
+
+
+def format_attendees_section(
+    people: Optional[People],
+    google_calendar_event: Optional[Dict[str, Any]],
+) -> str:
+    """
+    Create the Attendees section content for markdown export.
+
+    Args:
+        people: The People object from the document
+        google_calendar_event: The google_calendar_event dict
+
+    Returns:
+        Markdown formatted attendees list, or empty string if no attendees
+    """
+    if not people:
+        return ""
+
+    lines = []
+
+    # Process creator first
+    if people.creator:
+        creator = people.creator
+        # Create a pseudo-Attendee for the creator
+        creator_attendee = Attendee(
+            name=creator.name,
+            email=creator.email,
+            details=creator.details,
+        )
+        gcal_info = get_gcal_attendee_info(creator.email, google_calendar_event)
+        lines.append(format_attendee_line(creator_attendee, gcal_info, is_creator=True))
+
+    # Process other attendees
+    for attendee in people.attendees or []:
+        # Skip if this is the same as creator
+        if people.creator and attendee.email and attendee.email.lower() == people.creator.email.lower():
+            continue
+
+        gcal_info = get_gcal_attendee_info(attendee.email, google_calendar_event)
+        lines.append(format_attendee_line(attendee, gcal_info, is_creator=False))
+
+    return "\n".join(lines) if lines else ""
+
+
 def create_full_note_markdown(
     document: Document,
     panels: Dict[str, PanelContent],
@@ -362,9 +585,15 @@ def create_full_note_markdown(
     ```
     # {Title}
 
-    **Created:** {created_at}
-    **Updated:** {updated_at}
-    **Source:** {creation_source}
+    - **Meeting:** {meeting_time}
+    - **Created:** {created_at}
+    - **Updated:** {updated_at}
+    - **Source:** {creation_source}
+
+    ## Attendees
+
+    - **Name** <email> - Title, Company [LinkedIn](url) *(organizer)*
+    - **Name** <email> - Title, Company *(declined)*
 
     ---
 
@@ -401,9 +630,23 @@ def create_full_note_markdown(
 
     # Header section
     parts.append(f"# {document.title or 'Untitled'}\n")
-    parts.append(f"**Created:** {document.created_at}")
-    parts.append(f"**Updated:** {document.updated_at}")
-    parts.append(f"**Source:** {document.creation_source or 'unknown'}\n")
+
+    # Meeting time from Google Calendar
+    meeting_time = format_meeting_time(document.google_calendar_event)
+    if meeting_time:
+        parts.append(f"- **Meeting:** {meeting_time}")
+
+    parts.append(f"- **Created:** {document.created_at}")
+    parts.append(f"- **Updated:** {document.updated_at}")
+    parts.append(f"- **Source:** {document.creation_source or 'unknown'}\n")
+
+    # Attendees section
+    attendees_md = format_attendees_section(document.people, document.google_calendar_event)
+    if attendees_md:
+        parts.append("## Attendees\n")
+        parts.append(attendees_md)
+        parts.append("")
+
     parts.append("---\n")
 
     # My Notes section (user's notes)

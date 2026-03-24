@@ -52,11 +52,6 @@ class GranolaAuth:
         return GranolaAuth._get_config_path("supabase.json")
 
     @staticmethod
-    def get_cache_config_path() -> str:
-        """Get the path to the Granola cache-v3.json file"""
-        return GranolaAuth._get_config_path("cache-v3.json")
-
-    @staticmethod
     def get_access_token() -> str:
         """
         Get the access token from Granola's local configuration.

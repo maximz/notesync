@@ -4,7 +4,6 @@ Implements Granola API behaviors compatible with the Granola extension for Rayca
 """
 
 import json
-import os
 import time
 from typing import Any, Dict, List, Optional
 
@@ -18,7 +17,6 @@ from .models import (
     FoldersResponse,
     TranscriptSegment,
     PanelContent,
-    GranolaCache,
 )
 
 
@@ -259,44 +257,15 @@ class GranolaAPI:
             raise Exception(f"Failed to fetch folders: {e}")
 
     # ========================================================================
-    # Cache Reader (for AI-generated panels)
+    # Panel Methods (AI-generated content)
     # ========================================================================
-
-    def read_cache(self) -> Optional[GranolaCache]:
-        """
-        Read Granola's local cache file (cache-v3.json).
-        Contains AI-generated panel content not available via API.
-
-        Returns:
-            GranolaCache object or None if cache doesn't exist
-
-        Raises:
-            Exception: If cache file exists but cannot be parsed
-        """
-        cache_path = GranolaAuth.get_cache_config_path()
-
-        if not os.path.exists(cache_path):
-            return None
-
-        try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                content = f.read()
-                cache_data = json.loads(content)
-
-            # Handle both string and object formats (like getCache.ts)
-            cache_value = cache_data.get("cache")
-            if isinstance(cache_value, str):
-                cache_value = json.loads(cache_value)
-
-            return GranolaCache(**cache_value)
-
-        except Exception as e:
-            raise Exception(f"Failed to read cache from {cache_path}: {e}")
 
     def get_document_panels(self, document_id: str, verbose: bool = False) -> Dict[str, PanelContent]:
         """
-        Get AI-generated panels for a specific document from cache.
-        Panels include summaries, action items, and other enhanced content.
+        Get AI-generated panels for a specific document via API.
+
+        POST /v1/get-document-panels
+        Body: {"document_id": str}
 
         Args:
             document_id: The document ID to get panels for
@@ -304,60 +273,43 @@ class GranolaAPI:
 
         Returns:
             Dictionary mapping panel_id to PanelContent
-            Returns empty dict if cache doesn't exist or document has no panels
+            Returns empty dict if the document has no panels
         """
+        url = f"{API_CONFIG['API_URL']}/get-document-panels"
+        body = {"document_id": document_id}
+
         try:
-            cache = self.read_cache()
+            response = self._retry_request("POST", url, json=body)
+            data = self._handle_response(response, "Get document panels")
         except Exception as e:
             if verbose:
-                print(f"DEBUG: Failed to read cache: {e}")
+                print(f"DEBUG: Failed to fetch panels for {document_id[:8]}: {e}")
             return {}
 
-        if not cache:
+        if not isinstance(data, list):
             if verbose:
-                print("DEBUG: Cache is None")
+                print(f"DEBUG: Unexpected response type: {type(data)}")
             return {}
-
-        if not cache.state:
-            if verbose:
-                print("DEBUG: Cache has no state")
-            return {}
-
-        if not cache.state.documentPanels:
-            if verbose:
-                print("DEBUG: Cache state has no documentPanels")
-            return {}
-
-        doc_panels = cache.state.documentPanels.get(document_id, {})
 
         if verbose:
-            print(f"DEBUG: Found {len(doc_panels)} panels for document {document_id[:8]}")
-            if doc_panels:
-                print(f"DEBUG: Panel IDs: {list(doc_panels.keys())}")
+            print(f"DEBUG: Found {len(data)} panels for document {document_id[:8]}")
 
-        # Convert raw dict to PanelContent objects
         result = {}
-        for panel_id, panel_data in doc_panels.items():
+        for panel_data in data:
             try:
-                # Ensure panel_data is a dict
-                if not isinstance(panel_data, dict):
-                    if verbose:
-                        print(f"DEBUG: Panel {panel_id} data is not a dict: {type(panel_data)}")
+                panel_id = panel_data.get("id", "")
+                if not panel_id:
                     continue
-
-                # Panel data should have 'original_content' and/or 'content'
                 panel = PanelContent(**panel_data)
                 result[panel_id] = panel
 
                 if verbose:
                     has_content = "content" if panel.content else "no content"
                     has_html = "HTML" if panel.original_content else "no HTML"
-                    print(f"DEBUG: Panel {panel_id}: {has_content}, {has_html}")
-
+                    print(f"DEBUG: Panel {panel_id[:8]}: {has_content}, {has_html}")
             except Exception as e:
                 if verbose:
-                    print(f"DEBUG: Failed to parse panel {panel_id}: {e}")
-                    print(f"DEBUG: Panel data keys: {panel_data.keys() if isinstance(panel_data, dict) else 'not a dict'}")
+                    print(f"DEBUG: Failed to parse panel: {e}")
                 continue
 
         return result

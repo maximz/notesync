@@ -202,7 +202,7 @@ class ExportEngine:
             console.print(f"[yellow]Warning: Could not fetch transcript for {document.title or 'Untitled'}: {e}[/yellow]")
             transcript_segments = []
 
-        # Get panels from cache
+        # Get panels from API
         try:
             panels = self.api.get_document_panels(document.id, verbose=verbose)
             if verbose:

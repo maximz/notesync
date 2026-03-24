@@ -333,26 +333,5 @@ class SyncState(BaseModel):
         return api_time > local_time
 
 
-# ============================================================================
-# Cache Models (from cache-v3.json)
-# ============================================================================
-
-
-class CacheState(BaseModel):
-    """
-    Represents the application state from Granola's cache-v3.json.
-    The cache contains AI-generated panel content and other local data.
-    """
-
-    documentPanels: Dict[str, Dict[str, Any]] = Field(default_factory=dict)  # doc_id -> panel_id -> panel_data
-
-
-class GranolaCache(BaseModel):
-    """Root cache structure from cache-v3.json"""
-
-    state: Optional[CacheState] = None
-    # There are many other fields in the cache, but we only need documentPanels
-
-
 # Update forward references for recursive models
 ContentNode.model_rebuild()

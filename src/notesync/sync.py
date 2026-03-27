@@ -141,12 +141,7 @@ class SyncDatabase:
         finally:
             conn.close()
 
-    def should_sync(
-        self,
-        document: Document,
-        force: bool = False,
-        current_panel_count: Optional[int] = None,
-    ) -> bool:
+    def should_sync(self, document: Document, force: bool = False) -> bool:
         """
         Determine if a document should be synced.
         A document should be synced if:
@@ -154,12 +149,14 @@ class SyncDatabase:
         - It's never been synced before
         - Its updated_at timestamp is newer than the last sync
         - The meeting ended after we last synced it (transcript may have been incomplete)
-        - Panels appeared since last sync (was 0, now > 0)
+
+        Note: stale panel detection (panels appeared after export) is handled
+        separately via the two-pass check in ExportEngine.sync_all_notes,
+        using get_docs_without_panels() + API panel count comparison.
 
         Args:
             document: The document to check
             force: If True, always return True
-            current_panel_count: If provided, compare against stored panel_count
 
         Returns:
             True if document should be synced, False otherwise
@@ -180,14 +177,6 @@ class SyncDatabase:
         # Re-sync if meeting ended after (or shortly before) we last synced
         # This catches transcripts that were still processing when first synced
         if self._meeting_ended_after_sync(document, sync_state):
-            return True
-
-        # Re-sync if panels appeared since last export (was 0, now > 0)
-        if (
-            current_panel_count is not None
-            and sync_state.panel_count == 0
-            and current_panel_count > 0
-        ):
             return True
 
         return False

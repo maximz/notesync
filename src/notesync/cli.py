@@ -480,8 +480,6 @@ def generate(document_id: str, verbose: bool):
       notesync generate d0c0463a --verbose
     """
     try:
-        from .auth import GranolaAuth
-
         try:
             GranolaAuth.get_access_token()
         except (FileNotFoundError, ValueError) as e:
@@ -506,6 +504,12 @@ def generate(document_id: str, verbose: bool):
 
         doc = matches[0]
         console.print(f"[cyan]Document:[/cyan] {doc.title} ({doc.id[:8]})")
+
+        # Check if meeting has ended
+        if not doc.is_meeting_ended():
+            console.print("[bold red]Meeting has not ended yet (or is not a valid meeting).[/bold red]")
+            console.print(f"[dim]meeting_end_count={doc.meeting_end_count}, valid_meeting={doc.valid_meeting}[/dim]")
+            sys.exit(1)
 
         # Check if panels already exist
         existing_panels = api.get_document_panels(doc.id, verbose=verbose)

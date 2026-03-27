@@ -4,11 +4,13 @@ Implements Granola API behaviors compatible with the Granola extension for Rayca
 """
 
 import json
+import re
 import time
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+import markdown as markdown_lib
 import requests
 
 from .auth import GranolaAuth, UserInfo
@@ -567,7 +569,6 @@ class GranolaAPI:
                 continue
 
         # Strip <notes>...</notes> wrapper if present (Granola LLM wraps content in these tags)
-        import re
         content = re.sub(r"^\s*<notes>\s*", "", content)
         content = re.sub(r"\s*</notes>\s*$", "", content)
         content = content.strip()
@@ -618,8 +619,7 @@ class GranolaAPI:
         # The desktop client converts markdown to HTML before saving.
         # The LLM returns markdown; wrap it minimally so the panel API accepts it.
         # Granola stores panel content as HTML internally.
-        import markdown
-        content_html = markdown.markdown(
+        content_html = markdown_lib.markdown(
             generated_content,
             extensions=["tables", "fenced_code"],
         )

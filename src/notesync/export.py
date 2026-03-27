@@ -222,8 +222,8 @@ class ExportEngine:
             console.print(f"[yellow]Warning: Could not read panels for {document.title or 'Untitled'}: {e}[/yellow]")
             panels = {}
 
-        # Auto-generate notes if requested and no panels exist
-        if generate and not panels and transcript_segments:
+        # Auto-generate notes if requested, no panels exist, and meeting has ended
+        if generate and not panels and transcript_segments and document.is_meeting_ended():
             try:
                 if verbose:
                     console.print(f"[dim]  No panels found, generating notes...[/dim]")
@@ -374,6 +374,7 @@ class ExportEngine:
                                 panel_resync += 1
                         except Exception:
                             pass
+                        time.sleep(0.1)
                     if panel_resync > 0 and verbose:
                         console.print(f"[blue]  {panel_resync} document(s) gained panels since last sync[/blue]")
 
@@ -447,8 +448,9 @@ class ExportEngine:
                         status = "new" if is_new else "updated"
                         console.print(f"  [green]✓[/green] {folder_name}/{self.generate_filename(doc)} ({status})")
 
-                    # Small delay to avoid overwhelming the API
-                    time.sleep(0.1)
+                    # Delay between docs to avoid overwhelming the API
+                    # Each doc makes 2-3 API calls (transcript + panels + optional generate)
+                    time.sleep(0.2)
 
                 except Exception as e:
                     stats["failed"] += 1

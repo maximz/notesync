@@ -198,6 +198,11 @@ class Document(BaseModel):
         timestamp = self.updated_at.replace("Z", "+00:00")
         return datetime.fromisoformat(timestamp)
 
+    def is_meeting_ended(self) -> bool:
+        """Check if this meeting has ended and is safe to process.
+        A meeting is ended when meeting_end_count >= 1 and valid_meeting is True."""
+        return (self.meeting_end_count or 0) >= 1 and self.valid_meeting is True
+
 
 class GetDocumentsResponse(BaseModel):
     """Response from the /v2/get-documents API endpoint"""

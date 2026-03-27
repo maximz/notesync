@@ -278,13 +278,14 @@ class SyncDatabase:
         finally:
             conn.close()
 
-    def mark_many_synced(self, sync_records: List[tuple]):
+    def mark_many_synced(self, sync_records: List[Dict[str, Any]]):
         """
         Mark multiple documents as synced in a single transaction.
         More efficient than calling mark_synced() repeatedly.
 
         Args:
-            sync_records: List of tuples (doc_id, title, created_at, updated_at, file_path, panel_count)
+            sync_records: List of dicts with keys: doc_id, title, created_at,
+                          updated_at, file_path, panel_count
         """
         if not sync_records:
             return
@@ -294,18 +295,26 @@ class SyncDatabase:
             cursor = conn.cursor()
             synced_at = datetime.utcnow().isoformat() + "Z"
 
-            # Prepare records with synced_at
-            records_with_sync_time = [
-                (*record, synced_at) for record in sync_records
+            rows = [
+                (
+                    record["doc_id"],
+                    record["title"],
+                    record["created_at"],
+                    record["updated_at"],
+                    record["file_path"],
+                    synced_at,
+                    record.get("panel_count", 0),
+                )
+                for record in sync_records
             ]
 
             cursor.executemany(
                 """
                 INSERT OR REPLACE INTO synced_documents
-                (doc_id, title, created_at, updated_at, file_path, panel_count, synced_at)
+                (doc_id, title, created_at, updated_at, file_path, synced_at, panel_count)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                records_with_sync_time,
+                rows,
             )
 
             conn.commit()

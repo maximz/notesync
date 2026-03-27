@@ -428,14 +428,14 @@ class ExportEngine:
                         stored_file_path = file_path
 
                     # Track sync record (includes panel_count for stale panel detection)
-                    sync_records.append((
-                        doc.id,
-                        doc.title or "Untitled",
-                        doc.created_at,
-                        doc.updated_at,
-                        stored_file_path,
-                        panel_count,
-                    ))
+                    sync_records.append({
+                        "doc_id": doc.id,
+                        "title": doc.title or "Untitled",
+                        "created_at": doc.created_at,
+                        "updated_at": doc.updated_at,
+                        "file_path": stored_file_path,
+                        "panel_count": panel_count,
+                    })
 
                     # Update stats
                     if is_new:

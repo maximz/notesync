@@ -14,6 +14,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
 from .api import GranolaAPI
+from .auth import GranolaAuth
 from .markdown import create_full_note_markdown
 from .models import Document, Folder
 from .sync import SYNC_DB_FILENAME, SyncDatabase
@@ -35,6 +36,15 @@ class ExportEngine:
             api: Optional GranolaAPI instance. If not provided, will create one.
         """
         self.api = api or GranolaAPI()
+
+    def _get_user_info(self):
+        """Get user info, caching the result."""
+        if not hasattr(self, "_user_info"):
+            try:
+                self._user_info = GranolaAuth.get_user_info()
+            except Exception:
+                self._user_info = None
+        return self._user_info
 
     def sanitize_title(self, title: str) -> str:
         """
@@ -170,7 +180,8 @@ class ExportEngine:
         folder_name: str,
         verbose: bool = False,
         debug: bool = False,
-    ) -> str:
+        generate: bool = False,
+    ) -> tuple:
         """
         Export a single note to a markdown file.
 
@@ -181,7 +192,7 @@ class ExportEngine:
             verbose: If True, print detailed debug information
 
         Returns:
-            Full path to the exported file
+            Tuple of (file_path, panel_count)
 
         Raises:
             Exception: If export fails
@@ -211,6 +222,22 @@ class ExportEngine:
             console.print(f"[yellow]Warning: Could not read panels for {document.title or 'Untitled'}: {e}[/yellow]")
             panels = {}
 
+        # Auto-generate notes if requested and no panels exist
+        if generate and not panels and transcript_segments:
+            try:
+                if verbose:
+                    console.print(f"[dim]  No panels found, generating notes...[/dim]")
+                user_info = self._get_user_info()
+                self.api.generate_notes_for_document(
+                    document, transcript_segments, user_info=user_info, verbose=verbose
+                )
+                # Re-fetch panels after generation
+                panels = self.api.get_document_panels(document.id, verbose=verbose)
+                if verbose:
+                    console.print(f"[dim]  Generated! Now {len(panels)} panel(s)[/dim]")
+            except Exception as e:
+                console.print(f"[yellow]Warning: Failed to generate notes for {document.title or 'Untitled'}: {e}[/yellow]")
+
         # Convert to markdown
         markdown_content = create_full_note_markdown(document, panels, transcript_segments, debug=debug)
 
@@ -218,7 +245,7 @@ class ExportEngine:
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(markdown_content)
 
-        return file_path
+        return file_path, len(panels)
 
     def sync_all_notes(
         self,
@@ -228,6 +255,7 @@ class ExportEngine:
         verbose: bool = False,
         debug: bool = False,
         since: Optional[Union[datetime, int]] = None,
+        generate: bool = False,
     ) -> Dict[str, Any]:
         """
         Sync all notes from Granola to disk.
@@ -316,7 +344,39 @@ class ExportEngine:
             docs_to_sync = documents
             console.print(f"[blue]Force sync: re-exporting all {len(docs_to_sync)} documents[/blue]")
         else:
+            # First pass: standard should_sync check (timestamp-based)
             docs_to_sync = [doc for doc in documents if sync_db.should_sync(doc, force=False)]
+
+            # Second pass: check docs that were previously synced without panels.
+            # If panels have since appeared, re-export them.
+            # Only check docs updated in the last 90 days to bound API calls.
+            panel_check_cutoff = datetime.now(timezone.utc) - timedelta(days=90)
+            docs_without_panels = {s.doc_id for s in sync_db.get_docs_without_panels()}
+            if docs_without_panels:
+                already_syncing = {doc.id for doc in docs_to_sync}
+                candidates = []
+                for doc in documents:
+                    if doc.id not in docs_without_panels or doc.id in already_syncing:
+                        continue
+                    try:
+                        doc_updated = datetime.fromisoformat(doc.updated_at.replace("Z", "+00:00"))
+                        if doc_updated >= panel_check_cutoff:
+                            candidates.append(doc)
+                    except (ValueError, TypeError):
+                        candidates.append(doc)
+                if candidates:
+                    panel_resync = 0
+                    for doc in candidates:
+                        try:
+                            panels = self.api.get_document_panels(doc.id)
+                            if len(panels) > 0:
+                                docs_to_sync.append(doc)
+                                panel_resync += 1
+                        except Exception:
+                            pass
+                    if panel_resync > 0 and verbose:
+                        console.print(f"[blue]  {panel_resync} document(s) gained panels since last sync[/blue]")
+
             console.print(
                 f"[blue]{len(docs_to_sync)} documents need syncing "
                 f"({len(documents) - len(docs_to_sync)} already up to date)[/blue]"
@@ -359,7 +419,7 @@ class ExportEngine:
                     is_new = sync_state is None
 
                     # Export the note
-                    file_path = self.export_single_note(doc, output_dir, folder_name, verbose=verbose, debug=debug)
+                    file_path, panel_count = self.export_single_note(doc, output_dir, folder_name, verbose=verbose, debug=debug, generate=generate)
 
                     # Store paths relative to output_dir for portability across machines.
                     try:
@@ -367,13 +427,14 @@ class ExportEngine:
                     except ValueError:
                         stored_file_path = file_path
 
-                    # Track sync record
+                    # Track sync record (includes panel_count for stale panel detection)
                     sync_records.append((
                         doc.id,
                         doc.title or "Untitled",
                         doc.created_at,
                         doc.updated_at,
                         stored_file_path,
+                        panel_count,
                     ))
 
                     # Update stats

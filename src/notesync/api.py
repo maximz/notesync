@@ -5,11 +5,13 @@ Implements Granola API behaviors compatible with the Granola extension for Rayca
 
 import json
 import time
+import uuid
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import requests
 
-from .auth import GranolaAuth
+from .auth import GranolaAuth, UserInfo
 from .models import (
     Document,
     Folder,
@@ -47,6 +49,35 @@ def get_user_agent() -> str:
 # ============================================================================
 # Granola API Client
 # ============================================================================
+
+
+def format_transcript_for_prompt(segments: List[TranscriptSegment]) -> str:
+    """
+    Format transcript segments into the text format expected by the Granola LLM proxy.
+    Matches the desktop client's p_() function: "Me: text Them: text ..." with speaker labels.
+
+    Args:
+        segments: List of transcript segments
+
+    Returns:
+        Formatted transcript string
+    """
+    if not segments:
+        return ""
+
+    sorted_segments = sorted(segments, key=lambda s: s.get_start_time())
+
+    result = ""
+    last_speaker = None
+
+    for seg in sorted_segments:
+        speaker = "Me" if seg.source == "microphone" else "Them"
+        if speaker != last_speaker:
+            result += " " + speaker + ": "
+            last_speaker = speaker
+        result += seg.text + " "
+
+    return result.strip()
 
 
 class GranolaAPI:
@@ -313,3 +344,285 @@ class GranolaAPI:
                 continue
 
         return result
+
+    # ========================================================================
+    # Note Generation Methods
+    # ========================================================================
+
+    def create_panel(self, document_id: str, template_slug: str = "meeting-summary-consolidated", verbose: bool = False) -> str:
+        """
+        Create a new panel for a document.
+
+        POST /v1/create-document-panel
+        Body: full panel object
+
+        Args:
+            document_id: The document ID
+            template_slug: The template slug to use
+            verbose: If True, print debug information
+
+        Returns:
+            The panel ID
+        """
+        now = datetime.utcnow().isoformat() + "Z"
+        panel_id = str(uuid.uuid4())
+
+        panel_data = {
+            "id": panel_id,
+            "document_id": document_id,
+            "title": "Summary",
+            "content": None,
+            "template_slug": template_slug,
+            "created_at": now,
+            "updated_at": now,
+            "content_updated_at": None,
+            "deleted_at": None,
+            "last_viewed_at": now,
+            "affinity_note_id": None,
+            "original_content": None,
+            "suggested_questions": None,
+            "generated_lines": None,
+            "user_feedback": None,
+            "ydoc_version": None,
+        }
+
+        url = f"{API_CONFIG['API_URL']}/create-document-panel"
+
+        if verbose:
+            print(f"DEBUG: Creating panel {panel_id[:8]} for document {document_id[:8]}")
+
+        try:
+            response = self._retry_request("POST", url, json=panel_data)
+            self._handle_response(response, "Create panel")
+        except Exception as e:
+            raise Exception(f"Failed to create panel for document {document_id}: {e}")
+
+        if verbose:
+            print(f"DEBUG: Panel {panel_id[:8]} created successfully")
+
+        return panel_id
+
+    def update_panel(self, panel_id: str, content_html: str, verbose: bool = False) -> None:
+        """
+        Update a panel with generated content.
+
+        POST /v1/update-document-panel
+        Body: panel update object
+
+        Args:
+            panel_id: The panel ID to update
+            content_html: The HTML content to set
+            verbose: If True, print debug information
+        """
+        now = datetime.utcnow().isoformat() + "Z"
+
+        update_data = {
+            "id": panel_id,
+            "content": content_html,
+            "original_content": content_html,
+            "last_viewed_at": now,
+            "content_updated_at": now,
+        }
+
+        url = f"{API_CONFIG['API_URL']}/update-document-panel"
+
+        if verbose:
+            print(f"DEBUG: Updating panel {panel_id[:8]} with {len(content_html)} chars of content")
+
+        try:
+            response = self._retry_request("POST", url, json=update_data)
+            self._handle_response(response, "Update panel")
+        except Exception as e:
+            raise Exception(f"Failed to update panel {panel_id}: {e}")
+
+        if verbose:
+            print(f"DEBUG: Panel {panel_id[:8]} updated successfully")
+
+    def stream_generate_notes(
+        self,
+        document: Document,
+        transcript_segments: List[TranscriptSegment],
+        user_info: Optional[UserInfo] = None,
+        verbose: bool = False,
+    ) -> str:
+        """
+        Stream-generate notes via the LLM proxy endpoint.
+
+        POST https://stream.api.granola.ai/v1/llm-proxy-stream
+        Body: {prompt_slug, prompt_variables, chat_history}
+
+        Args:
+            document: The document to generate notes for
+            transcript_segments: Transcript segments for the document
+            user_info: Optional user info for my_name field
+            verbose: If True, print debug information
+
+        Returns:
+            The generated content as a string (markdown/HTML from the LLM)
+        """
+        transcript_text = format_transcript_for_prompt(transcript_segments)
+
+        if verbose:
+            print(f"DEBUG: Transcript length: {len(transcript_text)} chars")
+
+        # Build prompt variables matching the Granola desktop client
+        my_name = user_info.name if user_info else ""
+        notes_text = document.notes_markdown or document.notes_plain or ""
+
+        # Build participants string
+        participants = ""
+        if document.people:
+            parts = []
+            creator = document.people.creator
+            if creator:
+                parts.append(f"{creator.name} <{creator.email}>")
+            for att in document.people.attendees or []:
+                name = att.name or (att.email.split("@")[0].title() if att.email else "")
+                if att.email:
+                    parts.append(f"{name} <{att.email}>")
+                elif name:
+                    parts.append(name)
+            participants = ", ".join(parts)
+
+        # Meeting time/date from calendar event
+        cal = document.google_calendar_event
+        meeting_time = ""
+        meeting_date = ""
+        if cal and cal.get("start", {}).get("dateTime"):
+            try:
+                start_dt = datetime.fromisoformat(cal["start"]["dateTime"].replace("Z", "+00:00"))
+                meeting_time = start_dt.strftime("%I:%M %p").lstrip("0")
+                meeting_date = start_dt.strftime("%A, %B %d, %Y")
+            except (ValueError, TypeError):
+                pass
+
+        todays_date = datetime.utcnow().strftime("%A, %B %d, %Y")
+        calendar_title = ""
+        if cal:
+            calendar_title = cal.get("summary", "") or document.title or ""
+        else:
+            calendar_title = document.title or ""
+
+        prompt_variables = {
+            "transcript": transcript_text,
+            "notes": notes_text,
+            "my_name": my_name,
+            "participants": participants,
+            "calendar_event_title": calendar_title,
+            "document_id": document.id,
+            "time": meeting_time,
+            "date": meeting_date,
+            "todays_date": todays_date,
+            "is_multi_language": False,
+            "english_only_summary": True,
+            "is_short_transcript": len(transcript_text) < 200,
+            "has_long_user_notes": len(notes_text.split("\n")) >= 20 if notes_text else False,
+        }
+
+        body = {
+            "prompt_slug": "meeting-summary-consolidated",
+            "prompt_variables": prompt_variables,
+            "chat_history": [],
+        }
+
+        url = f"{API_CONFIG['STREAM_API_URL']}/llm-proxy-stream"
+
+        if verbose:
+            print(f"DEBUG: Streaming generation from {url}")
+            print(f"DEBUG: prompt_slug=meeting-summary-consolidated, transcript={len(transcript_text)} chars")
+
+        try:
+            response = self.session.post(url, json=body, stream=True, timeout=120)
+            if not response.ok:
+                error_text = response.text
+                raise requests.HTTPError(
+                    f"LLM proxy stream failed: {response.status_code} {response.reason}: {error_text}",
+                    response=response,
+                )
+        except requests.RequestException as e:
+            raise Exception(f"Failed to stream generate notes: {e}")
+
+        # Parse streaming response: chunks separated by -----CHUNK_BOUNDARY-----
+        # Each chunk is a JSON object in OpenAI-compatible format
+        CHUNK_BOUNDARY = "-----CHUNK_BOUNDARY-----"
+        raw_buffer = ""
+        content = ""
+
+        for raw_chunk in response.iter_content(chunk_size=4096):
+            raw_buffer += raw_chunk.decode("utf-8", errors="replace")
+
+        for part in raw_buffer.split(CHUNK_BOUNDARY):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                chunk = json.loads(part)
+                choices = chunk.get("choices", [])
+                if choices:
+                    delta = choices[0].get("delta", {})
+                    text = delta.get("content", "")
+                    if text:
+                        content += text
+            except json.JSONDecodeError:
+                continue
+
+        # Strip <notes>...</notes> wrapper if present (Granola LLM wraps content in these tags)
+        import re
+        content = re.sub(r"^\s*<notes>\s*", "", content)
+        content = re.sub(r"\s*</notes>\s*$", "", content)
+        content = content.strip()
+
+        if verbose:
+            print(f"DEBUG: Generated {len(content)} chars of content")
+
+        return content
+
+    def generate_notes_for_document(
+        self,
+        document: Document,
+        transcript_segments: List[TranscriptSegment],
+        user_info: Optional[UserInfo] = None,
+        verbose: bool = False,
+    ) -> str:
+        """
+        Full generation flow: create panel, stream content, update panel.
+
+        Args:
+            document: The document to generate notes for
+            transcript_segments: Transcript segments
+            user_info: Optional user info
+            verbose: If True, print debug information
+
+        Returns:
+            The panel ID of the created panel
+        """
+        # Step 1: Create panel
+        panel_id = self.create_panel(document.id, verbose=verbose)
+
+        # Step 2: Stream-generate content
+        try:
+            generated_content = self.stream_generate_notes(
+                document, transcript_segments, user_info=user_info, verbose=verbose
+            )
+        except Exception as e:
+            if verbose:
+                print(f"DEBUG: Generation failed, panel {panel_id[:8]} was created but has no content")
+            raise
+
+        if not generated_content.strip():
+            if verbose:
+                print(f"DEBUG: Generation returned empty content")
+            raise Exception("Generation returned empty content")
+
+        # Step 3: Update panel with generated content
+        # The desktop client converts markdown to HTML before saving.
+        # The LLM returns markdown; wrap it minimally so the panel API accepts it.
+        # Granola stores panel content as HTML internally.
+        import markdown
+        content_html = markdown.markdown(
+            generated_content,
+            extensions=["tables", "fenced_code"],
+        )
+        self.update_panel(panel_id, content_html, verbose=verbose)
+
+        return panel_id

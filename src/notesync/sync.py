@@ -54,7 +54,8 @@ class SyncDatabase:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     file_path TEXT NOT NULL,
-                    synced_at TEXT NOT NULL
+                    synced_at TEXT NOT NULL,
+                    panel_count INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -66,6 +67,15 @@ class SyncDatabase:
                 ON synced_documents(updated_at)
                 """
             )
+
+            # Graceful migration: add panel_count column if it doesn't exist
+            # (for databases created before this column was added)
+            cursor.execute("PRAGMA table_info(synced_documents)")
+            columns = {row[1] for row in cursor.fetchall()}
+            if "panel_count" not in columns:
+                cursor.execute(
+                    "ALTER TABLE synced_documents ADD COLUMN panel_count INTEGER DEFAULT 0"
+                )
 
             conn.commit()
         finally:
@@ -89,22 +99,14 @@ class SyncDatabase:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT doc_id, title, created_at, updated_at, file_path, synced_at
+                SELECT doc_id, title, created_at, updated_at, file_path, synced_at, panel_count
                 FROM synced_documents
                 """
             )
 
             result = {}
             for row in cursor.fetchall():
-                sync_state = SyncState(
-                    doc_id=row["doc_id"],
-                    title=row["title"],
-                    created_at=row["created_at"],
-                    updated_at=row["updated_at"],
-                    file_path=row["file_path"],
-                    synced_at=row["synced_at"],
-                )
-                result[row["doc_id"]] = sync_state
+                result[row["doc_id"]] = self._row_to_sync_state(row)
 
             return result
         finally:
@@ -125,7 +127,7 @@ class SyncDatabase:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT doc_id, title, created_at, updated_at, file_path, synced_at
+                SELECT doc_id, title, created_at, updated_at, file_path, synced_at, panel_count
                 FROM synced_documents
                 WHERE doc_id = ?
                 """,
@@ -134,19 +136,17 @@ class SyncDatabase:
 
             row = cursor.fetchone()
             if row:
-                return SyncState(
-                    doc_id=row["doc_id"],
-                    title=row["title"],
-                    created_at=row["created_at"],
-                    updated_at=row["updated_at"],
-                    file_path=row["file_path"],
-                    synced_at=row["synced_at"],
-                )
+                return self._row_to_sync_state(row)
             return None
         finally:
             conn.close()
 
-    def should_sync(self, document: Document, force: bool = False) -> bool:
+    def should_sync(
+        self,
+        document: Document,
+        force: bool = False,
+        current_panel_count: Optional[int] = None,
+    ) -> bool:
         """
         Determine if a document should be synced.
         A document should be synced if:
@@ -154,10 +154,12 @@ class SyncDatabase:
         - It's never been synced before
         - Its updated_at timestamp is newer than the last sync
         - The meeting ended after we last synced it (transcript may have been incomplete)
+        - Panels appeared since last sync (was 0, now > 0)
 
         Args:
             document: The document to check
             force: If True, always return True
+            current_panel_count: If provided, compare against stored panel_count
 
         Returns:
             True if document should be synced, False otherwise
@@ -178,6 +180,14 @@ class SyncDatabase:
         # Re-sync if meeting ended after (or shortly before) we last synced
         # This catches transcripts that were still processing when first synced
         if self._meeting_ended_after_sync(document, sync_state):
+            return True
+
+        # Re-sync if panels appeared since last export (was 0, now > 0)
+        if (
+            current_panel_count is not None
+            and sync_state.panel_count == 0
+            and current_panel_count > 0
+        ):
             return True
 
         return False
@@ -236,6 +246,7 @@ class SyncDatabase:
         created_at: str,
         updated_at: str,
         file_path: str,
+        panel_count: int = 0,
     ):
         """
         Mark a document as synced.
@@ -247,6 +258,7 @@ class SyncDatabase:
             created_at: Document creation timestamp
             updated_at: Document update timestamp
             file_path: Path where the file was saved
+            panel_count: Number of panels at time of sync
         """
         conn = self._get_connection()
         try:
@@ -256,10 +268,10 @@ class SyncDatabase:
             cursor.execute(
                 """
                 INSERT OR REPLACE INTO synced_documents
-                (doc_id, title, created_at, updated_at, file_path, synced_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (doc_id, title, created_at, updated_at, file_path, synced_at, panel_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (doc_id, title, created_at, updated_at, file_path, synced_at),
+                (doc_id, title, created_at, updated_at, file_path, synced_at, panel_count),
             )
 
             conn.commit()
@@ -272,7 +284,7 @@ class SyncDatabase:
         More efficient than calling mark_synced() repeatedly.
 
         Args:
-            sync_records: List of tuples (doc_id, title, created_at, updated_at, file_path)
+            sync_records: List of tuples (doc_id, title, created_at, updated_at, file_path, panel_count)
         """
         if not sync_records:
             return
@@ -290,8 +302,8 @@ class SyncDatabase:
             cursor.executemany(
                 """
                 INSERT OR REPLACE INTO synced_documents
-                (doc_id, title, created_at, updated_at, file_path, synced_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (doc_id, title, created_at, updated_at, file_path, panel_count, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 records_with_sync_time,
             )
@@ -367,7 +379,7 @@ class SyncDatabase:
             # Try exact match first
             cursor.execute(
                 """
-                SELECT doc_id, title, created_at, updated_at, file_path, synced_at
+                SELECT doc_id, title, created_at, updated_at, file_path, synced_at, panel_count
                 FROM synced_documents
                 WHERE file_path = ?
                 """,
@@ -381,7 +393,7 @@ class SyncDatabase:
             # Fallback: deterministic suffix match for relative paths without SQL wildcards.
             cursor.execute(
                 """
-                SELECT doc_id, title, created_at, updated_at, file_path, synced_at
+                SELECT doc_id, title, created_at, updated_at, file_path, synced_at, panel_count
                 FROM synced_documents
                 """
             )
@@ -414,7 +426,27 @@ class SyncDatabase:
             updated_at=row["updated_at"],
             file_path=row["file_path"],
             synced_at=row["synced_at"],
+            panel_count=row["panel_count"] or 0,
         )
+
+    def get_docs_without_panels(self) -> List[SyncState]:
+        """
+        Get all synced documents that had no panels at last sync.
+        Used to identify docs that may need re-export if panels have since appeared.
+        """
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT doc_id, title, created_at, updated_at, file_path, synced_at, panel_count
+                FROM synced_documents
+                WHERE panel_count = 0 OR panel_count IS NULL
+                """
+            )
+            return [self._row_to_sync_state(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
 
     @staticmethod
     def _normalize_path(path: str) -> str:

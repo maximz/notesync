@@ -321,6 +321,7 @@ class SyncState(BaseModel):
     updated_at: str
     file_path: str
     synced_at: str  # ISO timestamp of when we synced it
+    panel_count: int = 0  # Number of panels at last sync (0 = no enhanced notes)
 
     def is_outdated(self, api_updated_at: str) -> bool:
         """

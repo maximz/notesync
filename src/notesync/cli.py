@@ -456,6 +456,116 @@ def forget(file_path: str, output_dir: Path, delete_file: bool):
 
 
 @cli.command()
+@click.option(
+    "--since",
+    type=int,
+    default=30,
+    help="Only check meetings from the last N days (default: 30)",
+)
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    help="Show detailed information",
+)
+def pending(since: int, verbose: bool):
+    """
+    List meetings that ended but have no generated notes.
+
+    Shows meetings with transcripts where the "Generate notes" button
+    was never clicked in Granola. Includes links to open each meeting.
+
+    Examples:
+
+      \b
+      # List meetings from last 30 days needing notes
+      notesync pending
+
+      \b
+      # Check last 7 days only
+      notesync pending --since 7
+    """
+    import time as _time
+    from datetime import datetime, timedelta, timezone
+
+    try:
+        try:
+            GranolaAuth.get_access_token()
+        except (FileNotFoundError, ValueError) as e:
+            console.print(f"[bold red]Error: {e}[/bold red]")
+            sys.exit(1)
+
+        api = GranolaAPI()
+
+        console.print("[blue]Fetching documents...[/blue]")
+        response = api.get_documents()
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=since)
+
+        # Filter to ended meetings within the time window
+        candidates = []
+        for doc in response.docs:
+            if not doc.is_meeting_ended():
+                continue
+            try:
+                updated = datetime.fromisoformat(doc.updated_at.replace("Z", "+00:00"))
+                if updated < cutoff:
+                    continue
+            except (ValueError, TypeError):
+                pass
+            candidates.append(doc)
+
+        if not candidates:
+            console.print(f"[green]No ended meetings found in the last {since} days.[/green]")
+            sys.exit(0)
+
+        console.print(f"[blue]Checking {len(candidates)} ended meetings for missing notes...[/blue]")
+
+        pending_docs = []
+        for doc in candidates:
+            panels = api.get_document_panels(doc.id)
+            has_content = any(p.content for p in panels.values())
+            if not has_content:
+                # Check if there's a transcript (worth generating for)
+                transcript = api.get_transcript(doc.id)
+                if transcript:
+                    pending_docs.append((doc, len(transcript)))
+            _time.sleep(0.1)
+
+        if not pending_docs:
+            console.print(f"[green]All meetings in the last {since} days have generated notes![/green]")
+            sys.exit(0)
+
+        # Display results
+        table = Table(title=f"Meetings needing notes ({len(pending_docs)})")
+        table.add_column("Date", style="green")
+        table.add_column("Title", style="cyan", no_wrap=False, max_width=60)
+        table.add_column("Segments", justify="right", style="yellow")
+
+        for doc, seg_count in sorted(pending_docs, key=lambda x: x[0].created_at, reverse=True):
+            created = doc.created_at[:10] if doc.created_at else "N/A"
+            table.add_row(
+                created,
+                doc.title or "Untitled",
+                str(seg_count),
+            )
+
+        console.print(table)
+        console.print(f"\n[dim]Open these meetings in Granola and click \"Generate notes\" to create summaries.[/dim]")
+        sys.exit(0)
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted by user[/yellow]")
+        sys.exit(130)
+    except Exception as e:
+        console.print(f"\n[bold red]Error: {e}[/bold red]")
+        if verbose:
+            import traceback
+            console.print(f"[dim]{traceback.format_exc()}[/dim]")
+        sys.exit(1)
+
+
+@cli.command()
 @click.argument("document_id", type=str)
 @click.option(
     "--verbose",

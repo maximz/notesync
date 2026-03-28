@@ -453,12 +453,18 @@ def forget(file_path: str, output_dir: Path, delete_file: bool):
     help="Only check meetings from the last N days (default: 30)",
 )
 @click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output as JSON (for scripting)",
+)
+@click.option(
     "--verbose",
     "-v",
     is_flag=True,
     help="Show detailed information",
 )
-def pending(since: int, verbose: bool):
+def pending(since: int, output_json: bool, verbose: bool):
     """
     List meetings that ended but have no generated notes.
 
@@ -487,7 +493,8 @@ def pending(since: int, verbose: bool):
 
         api = GranolaAPI()
 
-        console.print("[blue]Fetching documents...[/blue]")
+        if not output_json:
+            console.print("[blue]Fetching documents...[/blue]")
         response = api.get_documents()
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=since)
@@ -506,10 +513,15 @@ def pending(since: int, verbose: bool):
             candidates.append(doc)
 
         if not candidates:
-            console.print(f"[green]No meetings found in the last {since} days.[/green]")
+            if output_json:
+                import json
+                click.echo(json.dumps({"count": 0, "meetings": []}))
+            else:
+                console.print(f"[green]No meetings found in the last {since} days.[/green]")
             sys.exit(0)
 
-        console.print(f"[blue]Checking {len(candidates)} meetings for missing notes...[/blue]")
+        if not output_json:
+            console.print(f"[blue]Checking {len(candidates)} meetings for missing notes...[/blue]")
 
         pending_docs = []
         for doc in candidates:
@@ -523,25 +535,43 @@ def pending(since: int, verbose: bool):
             _time.sleep(0.1)
 
         if not pending_docs:
-            console.print(f"[green]All meetings in the last {since} days have generated notes![/green]")
+            if output_json:
+                import json
+                click.echo(json.dumps({"count": 0, "meetings": []}))
+            else:
+                console.print(f"[green]All meetings in the last {since} days have generated notes![/green]")
             sys.exit(0)
 
-        # Display results
-        table = Table(title=f"Meetings needing notes ({len(pending_docs)})")
-        table.add_column("Date", style="green")
-        table.add_column("Title", style="cyan", no_wrap=False, max_width=60)
-        table.add_column("Segments", justify="right", style="yellow")
+        sorted_docs = sorted(pending_docs, key=lambda x: x[0].created_at, reverse=True)
 
-        for doc, seg_count in sorted(pending_docs, key=lambda x: x[0].created_at, reverse=True):
-            created = doc.created_at[:10] if doc.created_at else "N/A"
-            table.add_row(
-                created,
-                doc.title or "Untitled",
-                str(seg_count),
-            )
+        if output_json:
+            import json
+            meetings = [
+                {
+                    "date": doc.created_at[:10] if doc.created_at else None,
+                    "title": doc.title or "Untitled",
+                    "segments": seg_count,
+                    "document_id": doc.id,
+                }
+                for doc, seg_count in sorted_docs
+            ]
+            click.echo(json.dumps({"count": len(meetings), "meetings": meetings}))
+        else:
+            table = Table(title=f"Meetings needing notes ({len(pending_docs)})")
+            table.add_column("Date", style="green")
+            table.add_column("Title", style="cyan", no_wrap=False, max_width=60)
+            table.add_column("Segments", justify="right", style="yellow")
 
-        console.print(table)
-        console.print(f"\n[dim]Open these meetings in Granola and click \"Generate notes\" to create summaries.[/dim]")
+            for doc, seg_count in sorted_docs:
+                created = doc.created_at[:10] if doc.created_at else "N/A"
+                table.add_row(
+                    created,
+                    doc.title or "Untitled",
+                    str(seg_count),
+                )
+
+            console.print(table)
+            console.print(f"\n[dim]Open these meetings in Granola and click \"Generate notes\" to create summaries.[/dim]")
         sys.exit(0)
 
     except KeyboardInterrupt:

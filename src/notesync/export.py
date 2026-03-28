@@ -428,6 +428,14 @@ class ExportEngine:
                     except ValueError:
                         stored_file_path = file_path
 
+                    # Clean up old file if the path changed (e.g. title rename)
+                    if sync_state and sync_state.file_path != stored_file_path:
+                        old_file = os.path.join(output_dir, sync_state.file_path)
+                        if os.path.exists(old_file):
+                            os.remove(old_file)
+                            if verbose:
+                                console.print(f"  [dim]Removed old file: {sync_state.file_path}[/dim]")
+
                     # Track sync record (includes panel_count for stale panel detection)
                     sync_records.append({
                         "doc_id": doc.id,

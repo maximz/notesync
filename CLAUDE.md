@@ -7,6 +7,7 @@ Exports Granola meeting notes to markdown via their API. Source in `src/notesync
 - Run tests: `uv run pytest tests/ -v`
 - Run single file: `uv run pytest tests/test_sync_migration.py -v`
 - Run CLI: `uv run notesync <command>`
+- After changing `pyproject.toml` dependencies: `uv tool install --editable . --force` to update the global `notesync` entrypoint
 
 ## Sync Database Schema Changes
 

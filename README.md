@@ -91,6 +91,8 @@ notesync sync ~/Dropbox/notesync_notes
 **Why `-e` (editable)?** Changes to the code are immediately reflected without reinstalling. If you just want to use the tool as-is, you can omit `-e`.
 Use the output of `which notesync` in your cron config so cron does not depend on shell PATH setup.
 
+**After changing dependencies in `pyproject.toml`**, re-run `uv tool install -e . --force` to update the tool environment. Code changes are picked up automatically via editable mode, but dependency changes are not.
+
 ## Usage
 
 ### Sync Command

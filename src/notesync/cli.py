@@ -511,10 +511,11 @@ def generate(document_id: str, verbose: bool):
             console.print(f"[dim]meeting_end_count={doc.meeting_end_count}, valid_meeting={doc.valid_meeting}[/dim]")
             sys.exit(1)
 
-        # Check if panels already exist
+        # Check if panels with content already exist
         existing_panels = api.get_document_panels(doc.id, verbose=verbose)
-        if existing_panels:
-            console.print(f"[yellow]Document already has {len(existing_panels)} panel(s). Skipping generation.[/yellow]")
+        panels_with_content = {pid: p for pid, p in existing_panels.items() if p.content}
+        if panels_with_content:
+            console.print(f"[yellow]Document already has {len(panels_with_content)} panel(s) with content. Skipping generation.[/yellow]")
             console.print("[dim]Use Granola to delete existing panels first if you want to regenerate.[/dim]")
             sys.exit(0)
 

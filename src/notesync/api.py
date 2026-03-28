@@ -404,15 +404,16 @@ class GranolaAPI:
 
         return panel_id
 
-    def update_panel(self, panel_id: str, content_html: str, verbose: bool = False) -> None:
+    def update_panel(self, panel_id: str, document_id: str, content_html: str, verbose: bool = False) -> None:
         """
         Update a panel with generated content.
 
         POST /v1/update-document-panel
-        Body: panel update object
+        Body: panel update object (must include document_id)
 
         Args:
             panel_id: The panel ID to update
+            document_id: The document ID the panel belongs to
             content_html: The HTML content to set
             verbose: If True, print debug information
         """
@@ -420,6 +421,7 @@ class GranolaAPI:
 
         update_data = {
             "id": panel_id,
+            "document_id": document_id,
             "content": content_html,
             "original_content": content_html,
             "last_viewed_at": now,
@@ -623,6 +625,6 @@ class GranolaAPI:
             generated_content,
             extensions=["tables", "fenced_code"],
         )
-        self.update_panel(panel_id, content_html, verbose=verbose)
+        self.update_panel(panel_id, document.id, content_html, verbose=verbose)
 
         return panel_id

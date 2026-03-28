@@ -14,7 +14,6 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
 from .api import GranolaAPI
-from .auth import GranolaAuth
 from .markdown import create_full_note_markdown
 from .models import Document, Folder
 from .sync import SYNC_DB_FILENAME, SyncDatabase
@@ -36,15 +35,6 @@ class ExportEngine:
             api: Optional GranolaAPI instance. If not provided, will create one.
         """
         self.api = api or GranolaAPI()
-
-    def _get_user_info(self):
-        """Get user info, caching the result."""
-        if not hasattr(self, "_user_info"):
-            try:
-                self._user_info = GranolaAuth.get_user_info()
-            except Exception:
-                self._user_info = None
-        return self._user_info
 
     def sanitize_title(self, title: str) -> str:
         """
@@ -180,7 +170,6 @@ class ExportEngine:
         folder_name: str,
         verbose: bool = False,
         debug: bool = False,
-        generate: bool = False,
     ) -> tuple:
         """
         Export a single note to a markdown file.
@@ -222,22 +211,6 @@ class ExportEngine:
             console.print(f"[yellow]Warning: Could not read panels for {document.title or 'Untitled'}: {e}[/yellow]")
             panels = {}
 
-        # Auto-generate notes if requested, no panels exist, and meeting has ended
-        if generate and not panels and transcript_segments and document.is_meeting_ended():
-            try:
-                if verbose:
-                    console.print(f"[dim]  No panels found, generating notes...[/dim]")
-                user_info = self._get_user_info()
-                self.api.generate_notes_for_document(
-                    document, transcript_segments, user_info=user_info, verbose=verbose
-                )
-                # Re-fetch panels after generation
-                panels = self.api.get_document_panels(document.id, verbose=verbose)
-                if verbose:
-                    console.print(f"[dim]  Generated! Now {len(panels)} panel(s)[/dim]")
-            except Exception as e:
-                console.print(f"[yellow]Warning: Failed to generate notes for {document.title or 'Untitled'}: {e}[/yellow]")
-
         # Convert to markdown
         markdown_content = create_full_note_markdown(document, panels, transcript_segments, debug=debug)
 
@@ -255,7 +228,6 @@ class ExportEngine:
         verbose: bool = False,
         debug: bool = False,
         since: Optional[Union[datetime, int]] = None,
-        generate: bool = False,
     ) -> Dict[str, Any]:
         """
         Sync all notes from Granola to disk.
@@ -420,7 +392,7 @@ class ExportEngine:
                     is_new = sync_state is None
 
                     # Export the note
-                    file_path, panel_count = self.export_single_note(doc, output_dir, folder_name, verbose=verbose, debug=debug, generate=generate)
+                    file_path, panel_count = self.export_single_note(doc, output_dir, folder_name, verbose=verbose, debug=debug)
 
                     # Store paths relative to output_dir for portability across machines.
                     try:
@@ -457,7 +429,7 @@ class ExportEngine:
                         console.print(f"  [green]✓[/green] {folder_name}/{self.generate_filename(doc)} ({status})")
 
                     # Delay between docs to avoid overwhelming the API
-                    # Each doc makes 2-3 API calls (transcript + panels + optional generate)
+                    # Each doc makes 2 API calls (transcript + panels)
                     time.sleep(0.2)
 
                 except Exception as e:

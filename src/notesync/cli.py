@@ -59,16 +59,11 @@ def cli():
     help="Show detailed logging for each note",
 )
 @click.option(
-    "--generate",
-    is_flag=True,
-    help="Auto-generate AI notes for meetings that have a transcript but no panels",
-)
-@click.option(
     "--debug",
     is_flag=True,
     help="Show debug output for markdown conversion",
 )
-def sync(output_dir: Path, force: bool, since: int, dry_run: bool, generate: bool, verbose: bool, debug: bool):
+def sync(output_dir: Path, force: bool, since: int, dry_run: bool, verbose: bool, debug: bool):
     """
     Sync Granola notes to a local directory.
 
@@ -95,10 +90,6 @@ def sync(output_dir: Path, force: bool, since: int, dry_run: bool, generate: boo
       \b
       # Preview what would be synced
       notesync sync ~/Documents/notesync-notes --dry-run
-
-      \b
-      # Auto-generate notes for meetings missing AI summaries
-      notesync sync ~/Documents/notesync-notes --generate
 
     The sync command:
     - Organizes notes by Granola folder structure
@@ -127,7 +118,6 @@ def sync(output_dir: Path, force: bool, since: int, dry_run: bool, generate: boo
             verbose=verbose,
             debug=debug,
             since=since,
-            generate=generate,
         )
 
         # Exit with success
@@ -552,113 +542,6 @@ def pending(since: int, verbose: bool):
 
         console.print(table)
         console.print(f"\n[dim]Open these meetings in Granola and click \"Generate notes\" to create summaries.[/dim]")
-        sys.exit(0)
-
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Interrupted by user[/yellow]")
-        sys.exit(130)
-    except Exception as e:
-        console.print(f"\n[bold red]Error: {e}[/bold red]")
-        if verbose:
-            import traceback
-            console.print(f"[dim]{traceback.format_exc()}[/dim]")
-        sys.exit(1)
-
-
-@cli.command()
-@click.argument("document_id", type=str)
-@click.option(
-    "--verbose",
-    "-v",
-    is_flag=True,
-    help="Show detailed logging",
-)
-def generate(document_id: str, verbose: bool):
-    """
-    Generate missing AI notes for a single document.
-
-    DOCUMENT_ID: Full or partial (prefix) document ID.
-
-    This triggers the same note generation that Granola performs when you
-    click "Generate notes" in the desktop app: creates a panel, streams
-    content from the LLM, and saves the result.
-
-    Examples:
-
-      \b
-      # Generate notes for a specific document
-      notesync generate d0c0463a --verbose
-    """
-    try:
-        try:
-            GranolaAuth.get_access_token()
-        except (FileNotFoundError, ValueError) as e:
-            console.print(f"[bold red]Error: {e}[/bold red]")
-            sys.exit(1)
-
-        api = GranolaAPI()
-
-        # Resolve partial document ID
-        console.print(f"[blue]Fetching documents to resolve ID {document_id}...[/blue]")
-        response = api.get_documents()
-        matches = [doc for doc in response.docs if doc.id.startswith(document_id)]
-
-        if not matches:
-            console.print(f"[bold red]No document found matching ID prefix '{document_id}'[/bold red]")
-            sys.exit(1)
-        if len(matches) > 1:
-            console.print(f"[bold red]Multiple documents match '{document_id}':[/bold red]")
-            for m in matches:
-                console.print(f"  {m.id[:8]} - {m.title}")
-            sys.exit(1)
-
-        doc = matches[0]
-        console.print(f"[cyan]Document:[/cyan] {doc.title} ({doc.id[:8]})")
-
-        # Check if meeting has ended
-        if not doc.is_meeting_ended():
-            console.print("[bold red]Meeting has not ended yet (or is not a valid meeting).[/bold red]")
-            console.print(f"[dim]meeting_end_count={doc.meeting_end_count}, valid_meeting={doc.valid_meeting}[/dim]")
-            sys.exit(1)
-
-        # Check if panels with content already exist
-        existing_panels = api.get_document_panels(doc.id, verbose=verbose)
-        panels_with_content = {pid: p for pid, p in existing_panels.items() if p.content}
-        if panels_with_content:
-            console.print(f"[yellow]Document already has {len(panels_with_content)} panel(s) with content. Skipping generation.[/yellow]")
-            console.print("[dim]Use Granola to delete existing panels first if you want to regenerate.[/dim]")
-            sys.exit(0)
-
-        # Fetch transcript
-        console.print("[blue]Fetching transcript...[/blue]")
-        transcript = api.get_transcript(doc.id)
-        if not transcript:
-            console.print("[bold red]No transcript found. Cannot generate notes without a transcript.[/bold red]")
-            sys.exit(1)
-        console.print(f"[green]Transcript: {len(transcript)} segments[/green]")
-
-        # Get user info for my_name
-        try:
-            user_info = GranolaAuth.get_user_info()
-        except Exception:
-            user_info = None
-
-        # Generate
-        console.print("[blue]Generating notes...[/blue]")
-        panel_id = api.generate_notes_for_document(
-            doc, transcript, user_info=user_info, verbose=verbose
-        )
-
-        console.print(f"[bold green]Notes generated successfully![/bold green]")
-        console.print(f"[dim]Panel ID: {panel_id[:8]}[/dim]")
-
-        # Verify
-        panels = api.get_document_panels(doc.id, verbose=verbose)
-        if panels:
-            console.print(f"[green]Verified: document now has {len(panels)} panel(s)[/green]")
-        else:
-            console.print("[yellow]Warning: panel created but not visible via get_document_panels yet[/yellow]")
-
         sys.exit(0)
 
     except KeyboardInterrupt:

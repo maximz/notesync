@@ -3,7 +3,7 @@ Data models for NoteSync.
 Pydantic models for Granola API and local cache payloads.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -200,8 +200,31 @@ class Document(BaseModel):
 
     def is_meeting_ended(self) -> bool:
         """Check if this meeting has ended and is safe to process.
-        A meeting is ended when meeting_end_count >= 1 and valid_meeting is True."""
-        return (self.meeting_end_count or 0) >= 1 and self.valid_meeting is True
+        A meeting is ended when Granola detected the end (meeting_end_count >= 1)
+        or validated it as a real meeting (valid_meeting == True)."""
+        if (self.meeting_end_count or 0) >= 1:
+            return True
+        if self.valid_meeting is True:
+            return True
+        return False
+
+    def is_likely_in_progress(self) -> bool:
+        """Check if this meeting appears to still be actively recording.
+        Returns False for old abandoned recordings (transcribe=True but created > 6h ago)."""
+        if self.is_meeting_ended():
+            return False
+        if self.transcribe is not True:
+            return False
+        # If created more than 6 hours ago, it's abandoned, not in-progress
+        try:
+            created = self.get_created_datetime()
+            now = datetime.now(timezone.utc)
+            age = now - created
+            if age > timedelta(hours=6):
+                return False
+        except Exception:
+            pass
+        return True
 
 
 class GetDocumentsResponse(BaseModel):

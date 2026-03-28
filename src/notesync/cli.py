@@ -495,7 +495,7 @@ def pending(since: int, verbose: bool):
         # Filter to ended meetings within the time window
         candidates = []
         for doc in response.docs:
-            if not doc.is_meeting_ended():
+            if doc.is_likely_in_progress():
                 continue
             try:
                 updated = datetime.fromisoformat(doc.updated_at.replace("Z", "+00:00"))
@@ -506,10 +506,10 @@ def pending(since: int, verbose: bool):
             candidates.append(doc)
 
         if not candidates:
-            console.print(f"[green]No ended meetings found in the last {since} days.[/green]")
+            console.print(f"[green]No meetings found in the last {since} days.[/green]")
             sys.exit(0)
 
-        console.print(f"[blue]Checking {len(candidates)} ended meetings for missing notes...[/blue]")
+        console.print(f"[blue]Checking {len(candidates)} meetings for missing notes...[/blue]")
 
         pending_docs = []
         for doc in candidates:

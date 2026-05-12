@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from notesync.auth import GranolaAuth
+from notesync.auth import GranolaAccount, GranolaAuth
 
 
 @pytest.fixture
@@ -25,11 +25,27 @@ def auth_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return supabase, stored_accounts
 
 
+def _account_entry(*, user_id: str, email: str, access_token: str) -> dict:
+    """One `accounts[]` entry as Granola writes it: `tokens` is stringified JSON."""
+    tokens = json.dumps({"access_token": access_token, "refresh_token": "rt"})
+    return {"userId": user_id, "email": email, "tokens": tokens}
+
+
 def _stored_accounts_payload(access_token: str) -> dict:
     """Build a `stored-accounts.json` body with the double-stringified shape."""
-    tokens = json.dumps({"access_token": access_token, "refresh_token": "rt"})
-    account = {"userId": "u", "email": "e@example.com", "tokens": tokens}
-    return {"accounts": json.dumps([account])}
+    return {
+        "accounts": json.dumps(
+            [_account_entry(user_id="u", email="e@example.com", access_token=access_token)]
+        )
+    }
+
+
+def _supabase_with_user_info(*, user_id: str, email: str, access_token: str) -> dict:
+    """Build a `supabase.json` body with workos tokens AND a parseable user_info."""
+    return {
+        "workos_tokens": {"access_token": access_token},
+        "user_info": json.dumps({"id": user_id, "email": email}),
+    }
 
 
 def test_workos_dict_form(auth_paths):
@@ -128,3 +144,155 @@ def test_non_dict_json_top_level_falls_through(auth_paths):
     supabase.write_text(json.dumps({"workos_tokens": {"access_token": "recovered"}}))
 
     assert GranolaAuth.get_access_token() == "recovered"
+
+
+# ---------------------------------------------------------------------------
+# Multi-account: list_accounts()
+# ---------------------------------------------------------------------------
+
+
+def test_list_accounts_returns_all_stored_accounts_in_order(auth_paths):
+    _, stored_accounts = auth_paths
+    stored_accounts.write_text(
+        json.dumps(
+            {
+                "accounts": json.dumps(
+                    [
+                        _account_entry(user_id="u1", email="a@x.com", access_token="tok-a"),
+                        _account_entry(user_id="u2", email="b@x.com", access_token="tok-b"),
+                    ]
+                )
+            }
+        )
+    )
+
+    accounts = GranolaAuth.list_accounts()
+    assert [(a.email, a.access_token, a.source) for a in accounts] == [
+        ("a@x.com", "tok-a", "stored-accounts"),
+        ("b@x.com", "tok-b", "stored-accounts"),
+    ]
+
+
+def test_list_accounts_skips_entries_missing_email_or_tokens(auth_paths):
+    _, stored_accounts = auth_paths
+    stored_accounts.write_text(
+        json.dumps(
+            {
+                "accounts": json.dumps(
+                    [
+                        {"userId": "u1", "email": "ok@x.com", "tokens": json.dumps({"access_token": "t"})},
+                        {"userId": "u2", "tokens": json.dumps({"access_token": "t"})},  # no email
+                        {"userId": "u3", "email": "no-tokens@x.com"},  # no tokens
+                        {"userId": "u4", "email": "empty@x.com", "tokens": json.dumps({})},  # tokens without access_token
+                    ]
+                )
+            }
+        )
+    )
+
+    accounts = GranolaAuth.list_accounts()
+    assert [a.email for a in accounts] == ["ok@x.com"]
+
+
+def test_list_accounts_merges_legacy_supabase_when_distinct(auth_paths):
+    supabase, stored_accounts = auth_paths
+    stored_accounts.write_text(
+        json.dumps(
+            {
+                "accounts": json.dumps(
+                    [_account_entry(user_id="u-stored", email="stored@x.com", access_token="tok-stored")]
+                )
+            }
+        )
+    )
+    supabase.write_text(
+        json.dumps(_supabase_with_user_info(user_id="u-legacy", email="legacy@x.com", access_token="tok-legacy"))
+    )
+
+    accounts = GranolaAuth.list_accounts()
+    assert len(accounts) == 2
+    assert accounts[0].email == "stored@x.com"
+    assert accounts[0].source == "stored-accounts"
+    assert accounts[1].email == "legacy@x.com"
+    assert accounts[1].source == "supabase"
+
+
+def test_list_accounts_deduplicates_legacy_by_user_id(auth_paths):
+    """
+    If supabase.json's user_id matches an account already in stored-accounts.json,
+    the legacy entry must NOT be appended — Granola is in the middle of migrating
+    that identity and the supabase.json token is the stale one.
+    """
+    supabase, stored_accounts = auth_paths
+    stored_accounts.write_text(
+        json.dumps(
+            {
+                "accounts": json.dumps(
+                    [_account_entry(user_id="shared-id", email="shared@x.com", access_token="tok-fresh")]
+                )
+            }
+        )
+    )
+    supabase.write_text(
+        json.dumps(_supabase_with_user_info(user_id="shared-id", email="shared@x.com", access_token="tok-stale"))
+    )
+
+    accounts = GranolaAuth.list_accounts()
+    assert len(accounts) == 1
+    assert accounts[0].access_token == "tok-fresh"
+
+
+def test_list_accounts_deduplicates_legacy_by_email(auth_paths):
+    """Same identity, different user_id (unlikely but defensive): dedupe on email."""
+    supabase, stored_accounts = auth_paths
+    stored_accounts.write_text(
+        json.dumps(
+            {
+                "accounts": json.dumps(
+                    [_account_entry(user_id="u-stored", email="dup@x.com", access_token="tok-fresh")]
+                )
+            }
+        )
+    )
+    supabase.write_text(
+        json.dumps(_supabase_with_user_info(user_id="u-other", email="dup@x.com", access_token="tok-stale"))
+    )
+
+    accounts = GranolaAuth.list_accounts()
+    assert len(accounts) == 1
+    assert accounts[0].email == "dup@x.com"
+
+
+def test_list_accounts_raises_file_not_found_when_no_files(auth_paths):
+    with pytest.raises(FileNotFoundError):
+        GranolaAuth.list_accounts()
+
+
+def test_list_accounts_raises_value_error_when_files_have_no_accounts(auth_paths):
+    _, stored_accounts = auth_paths
+    stored_accounts.write_text(json.dumps({"accounts": json.dumps([])}))
+
+    with pytest.raises(ValueError):
+        GranolaAuth.list_accounts()
+
+
+def test_list_accounts_falls_back_to_supabase_when_stored_corrupted(auth_paths):
+    supabase, stored_accounts = auth_paths
+    stored_accounts.write_text("{not json")
+    supabase.write_text(
+        json.dumps(_supabase_with_user_info(user_id="u", email="only@x.com", access_token="tok-only"))
+    )
+
+    accounts = GranolaAuth.list_accounts()
+    assert [(a.email, a.access_token, a.source) for a in accounts] == [
+        ("only@x.com", "tok-only", "supabase")
+    ]
+
+
+def test_list_accounts_returns_dataclass_instances(auth_paths):
+    _, stored_accounts = auth_paths
+    stored_accounts.write_text(json.dumps(_stored_accounts_payload("tok")))
+
+    accounts = GranolaAuth.list_accounts()
+    assert isinstance(accounts[0], GranolaAccount)
+    assert accounts[0].user_id == "u"

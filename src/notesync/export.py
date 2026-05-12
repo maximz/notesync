@@ -20,6 +20,9 @@ from .sync import SYNC_DB_FILENAME, SyncDatabase
 
 
 console = Console()
+# Errors go to stderr so shell wrappers (and cron capture) can distinguish
+# failure output from normal progress reporting.
+err_console = Console(stderr=True)
 
 
 class ExportEngine:
@@ -27,14 +30,23 @@ class ExportEngine:
     Main export engine for syncing Granola notes to disk.
     """
 
-    def __init__(self, api: Optional[GranolaAPI] = None):
+    def __init__(self, api: GranolaAPI):
         """
         Initialize the export engine.
 
+        The API instance must be supplied so the engine can't accidentally
+        pick up a default single-account context. Callers should construct a
+        per-account `GranolaAPI(access_token=...)` and pass it in.
+
         Args:
-            api: Optional GranolaAPI instance. If not provided, will create one.
+            api: A configured GranolaAPI client.
         """
-        self.api = api or GranolaAPI()
+        if api is None:
+            raise ValueError(
+                "ExportEngine requires an explicit GranolaAPI instance. "
+                "Construct one with GranolaAPI(access_token=<token>)."
+            )
+        self.api = api
 
     def sanitize_title(self, title: str) -> str:
         """
@@ -278,7 +290,7 @@ class ExportEngine:
             console.print(f"[green]Found {len(documents)} documents and {len(folders)} folders[/green]")
 
         except Exception as e:
-            console.print(f"[bold red]Error fetching data from Granola API: {e}[/bold red]")
+            err_console.print(f"[bold red]Error fetching data from Granola API: {e}[/bold red]")
             raise
 
         # Get folder structure

@@ -184,7 +184,7 @@ uv run notesync forget FILE_PATH [OPTIONS]
 ```
 
 **Options:**
-- `--output-dir PATH`: Output directory containing .notesync-sync.db (auto-detects if not specified)
+- `--output-dir PATH`: Per-account directory containing `.notesync-sync.db` (auto-detects if not specified). With the multi-account layout, this is `OUTPUT_DIR/<account-email>/`, not the base `OUTPUT_DIR`.
 - `--delete-file`: Also delete the markdown file from disk
 
 **Use Cases:**
@@ -196,13 +196,15 @@ uv run notesync forget FILE_PATH [OPTIONS]
 
 ```bash
 # Forget a note (keeps file, removes from sync state)
-uv run notesync forget "Uncategorized/20240101_2100.Meeting_Title.7ab123dd.md" --output-dir ~/Dropbox/notesync_notes
+uv run notesync forget "Uncategorized/20240101_2100.Meeting_Title.7ab123dd.md" \
+    --output-dir ~/Dropbox/notesync_notes/alice_example_com
 
 # Forget and delete the file
-uv run notesync forget "Uncategorized/20240101_2100.Meeting_Title.7ab123dd.md" --output-dir ~/Dropbox/notesync_notes --delete-file
+uv run notesync forget "Uncategorized/20240101_2100.Meeting_Title.7ab123dd.md" \
+    --output-dir ~/Dropbox/notesync_notes/alice_example_com --delete-file
 
-# Auto-detect output directory (when run from notes directory)
-cd ~/Dropbox/notesync_notes
+# Auto-detect output directory (when run from the per-account notes directory)
+cd ~/Dropbox/notesync_notes/alice_example_com
 uv run notesync forget "Uncategorized/20240101_2100.Meeting_Title.7ab123dd.md"
 ```
 
@@ -512,17 +514,18 @@ With Git integration, your repository will look like:
 notesync-notes/
 |-- .git/                        # Git metadata
 |-- .gitignore                   # Excludes .notesync-sync.db
-|-- .notesync-sync.db            # NOT in git (machine-specific)
-|-- Team Meetings/
-|   |-- 20251025_1430.Weekly_Team_Sync.a1b2c3d4.md
-|   \-- 20251023_0900.Sprint_Planning.e5f6g7h8.md
-|-- 1-on-1s/
-|   \-- 20251024_1500_Check_in_Jane_i9j0k1l2.md
-\-- Uncategorized/
-    \-- 20251020_1000.Random_Ideas.m3n4o5p6.md
+\-- alice_example_com/           # One subdirectory per Granola account
+    |-- .notesync-sync.db        # NOT in git (machine-specific)
+    |-- Team Meetings/
+    |   |-- 20251025_1430.Weekly_Team_Sync.a1b2c3d4.md
+    |   \-- 20251023_0900.Sprint_Planning.e5f6g7h8.md
+    |-- 1-on-1s/
+    |   \-- 20251024_1500_Check_in_Jane_i9j0k1l2.md
+    \-- Uncategorized/
+        \-- 20251020_1000.Random_Ideas.m3n4o5p6.md
 ```
 
-The `.notesync-sync.db` file exists locally but is ignored by Git, allowing each machine to maintain its own sync state while the actual notes are version controlled.
+The per-account `.notesync-sync.db` files exist locally but are ignored by Git, allowing each machine to maintain its own sync state while the actual notes are version controlled.
 
 ## Alternative: Direct Cron Sync (No Git Automation)
 
@@ -550,18 +553,19 @@ crontab -e
 
 ## Output Structure
 
-Exported notes are organized by folder with timestamp-prefixed filenames:
+Exported notes are organized by account, then by folder, with timestamp-prefixed filenames:
 
 ```
 ~/Dropbox/notesync_notes/
- .notesync-sync.db                    # Sync state database
- Team Meetings/                       # Folder from Granola
-    20251025_1430.Weekly_Team_Sync.a1b2c3d4.md
-    20251023_0900.Sprint_Planning.e5f6g7h8.md
- 1-on-1s/
-    20251024_1500.Check_in_with_Jane.i9j0k1l2.md
- Uncategorized/                       # Notes without folders
-     20251020_1000.Random_Ideas.m3n4o5p6.md
+ alice_example_com/                   # One subdir per Granola account
+    .notesync-sync.db                 # Per-account sync state database
+    Team Meetings/                    # Folder from Granola
+       20251025_1430.Weekly_Team_Sync.a1b2c3d4.md
+       20251023_0900.Sprint_Planning.e5f6g7h8.md
+    1-on-1s/
+       20251024_1500.Check_in_with_Jane.i9j0k1l2.md
+    Uncategorized/                    # Notes without folders
+        20251020_1000.Random_Ideas.m3n4o5p6.md
 ```
 
 ### Markdown File Format
@@ -625,16 +629,55 @@ Attendee information includes:
 
 ### Authentication
 
-NoteSync reads authentication credentials from the Granola desktop app's local configuration:
+NoteSync reads authentication credentials from the Granola desktop app's local configuration. It checks two files, preferring the newer multi-account file when both are present:
 
-- **macOS**: `~/Library/Application Support/Granola/supabase.json`
-- **Windows**: `%APPDATA%\Granola\supabase.json`
+- `stored-accounts.json` (recent Granola builds, one entry per signed-in account)
+- `supabase.json` (legacy single-account layout)
 
-No separate login required - as long as you're logged into the Granola desktop app, the CLI will work.
+Per platform:
+
+- **macOS**: `~/Library/Application Support/Granola/`
+- **Linux**: `~/.config/Granola/` (stored-accounts.json) or `~/Library/Application Support/Granola/` (supabase.json)
+- **Windows**: `%APPDATA%\Granola\`
+
+No separate login required — as long as you're signed into Granola in the desktop app, the CLI picks up the credentials. If you're signed into multiple accounts, each one is synced into its own subdirectory (see [Multiple accounts](#multiple-accounts) below).
+
+### Multiple accounts
+
+By default, `notesync sync OUTPUT_DIR` syncs every account in `stored-accounts.json` into its own subdirectory, sanitized from the email address:
+
+```
+OUTPUT_DIR/
+├── alice_example_com/
+│   ├── .notesync-sync.db
+│   └── ... notes ...
+└── bob_work_io/
+    ├── .notesync-sync.db
+    └── ... notes ...
+```
+
+Each subdirectory has its own sync database, so accounts can be synced independently and don't collide on folder/file names.
+
+Discover what's signed in with `notesync accounts` — it prints each account's email, the sanitized subdirectory `sync` will use for it, and where the credentials came from:
+
+```bash
+notesync accounts          # table
+notesync accounts --json   # machine-readable
+```
+
+Pin to one account with `--account`:
+
+```bash
+notesync sync ~/Documents/notesync-notes --account alice@example.com
+```
+
+`list-folders`, `list-notes`, and `pending` accept the same `--account` flag and iterate every account by default. `forget` operates on one account's sync DB — point `--output-dir` at the per-account subdirectory (e.g. `~/Documents/notesync-notes/alice_example_com`).
+
+Migrating from a pre-multi-account install: if `OUTPUT_DIR/.notesync-sync.db` exists at the root (left by an older NoteSync), the next `sync` will refuse to run and tell you exactly how to move your existing notes into the new per-account subdirectory before continuing.
 
 ### Incremental Sync
 
-The CLI tracks which documents have been synced in a local SQLite database (`.notesync-sync.db` in the output directory). On each run:
+The CLI tracks which documents have been synced in a per-account SQLite database (`<OUTPUT_DIR>/<account>/.notesync-sync.db`). On each run:
 
 1. Fetches all documents from Granola API
 2. Compares `updated_at` timestamps with local sync state
@@ -651,8 +694,7 @@ The CLI is behaviorally compatible with the same Granola API endpoints used by t
 - `GET /v2/get-documents` - Fetch all notes
 - `POST /v1/get-document-transcript` - Fetch transcript for a note
 - `POST /v1/get-document-lists-metadata` - Fetch folder metadata
-
-It also reads AI-generated panel content from the local cache file (`cache-v3.json`).
+- `POST /v1/get-document-panels` - Fetch AI-generated panel content (summaries, action items, etc.)
 
 ## Troubleshooting
 
@@ -729,13 +771,13 @@ uv run python -m notesync.cli [command]
 # Run unit tests (pytest)
 uv run --group dev pytest -q
 
-# Test authentication
-uv run python -c "from notesync.auth import GranolaAuth; print(GranolaAuth.get_user_info().email)"
+# List discovered Granola accounts
+uv run notesync accounts
 
-# Test API connection
-uv run python -c "from notesync.api import GranolaAPI; print(len(GranolaAPI().get_documents().docs), 'documents')"
+# Test API connection for the first account
+uv run python -c "from notesync.auth import GranolaAuth; from notesync.api import GranolaAPI; a = GranolaAuth.list_accounts()[0]; print(a.email, len(GranolaAPI(access_token=a.access_token).get_documents().docs), 'documents')"
 
-# Dry run sync
+# Dry run sync (all accounts, into per-account subdirs)
 uv run notesync sync /tmp/test-export --dry-run
 ```
 

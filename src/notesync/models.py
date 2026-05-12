@@ -292,12 +292,14 @@ class FolderIcon(BaseModel):
 class FolderMember(BaseModel):
     """Member of a shared folder"""
 
+    # Granola's folder-members payload is sparse: pending invites, members
+    # who never set a profile picture, etc. arrive with these fields absent.
     user_id: str
-    name: str
-    email: str
-    avatar: str
-    role: str
-    created_at: str
+    name: Optional[str] = None
+    email: Optional[str] = None
+    avatar: Optional[str] = None
+    role: Optional[str] = None
+    created_at: Optional[str] = None
 
 
 class Folder(BaseModel):

@@ -8,8 +8,9 @@ Supports the legacy `supabase.json` layout and the newer multi-account
 import json
 import os
 import platform
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 
 class UserInfo:
@@ -20,6 +21,16 @@ class UserInfo:
         self.email = email
         self.name = name
         self.picture = picture
+
+
+@dataclass(frozen=True)
+class GranolaAccount:
+    """A single Granola account: an identity plus the credentials to act as it."""
+
+    email: str
+    access_token: str
+    user_id: Optional[str] = None
+    source: str = "stored-accounts"  # "stored-accounts" or "supabase"
 
 
 class GranolaAuth:
@@ -103,29 +114,161 @@ class GranolaAuth:
         Extract access_token from the multi-account `stored-accounts.json` shape:
         `{"accounts": "[{\"tokens\": \"{\\\"access_token\\\": ...}\", ...}]"}`.
         Both `accounts` and each `tokens` field are stringified JSON.
-        Picks the first account; multi-account selection can be added later if needed.
+        Picks the first account; preserved for legacy single-token callers
+        (`get_access_token`). Multi-account callers should use `list_accounts`.
         """
+        accounts = GranolaAuth._parse_stored_accounts(json_data)
+        if accounts:
+            return accounts[0].access_token
+        return None
+
+    @staticmethod
+    def _parse_stored_accounts(json_data: dict) -> List[GranolaAccount]:
+        """Parse the `stored-accounts.json` body into one GranolaAccount per entry."""
         raw = json_data.get("accounts")
         if not raw:
-            return None
+            return []
         try:
-            accounts = json.loads(raw) if isinstance(raw, str) else raw
-            if not isinstance(accounts, list) or not accounts:
-                return None
-            tokens_raw = accounts[0].get("tokens")
-            if not tokens_raw:
-                return None
-            tokens = json.loads(tokens_raw) if isinstance(tokens_raw, str) else tokens_raw
-            if isinstance(tokens, dict):
-                return tokens.get("access_token")
-        except (json.JSONDecodeError, TypeError, AttributeError):
-            pass
-        return None
+            accounts_list = json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, TypeError):
+            return []
+        if not isinstance(accounts_list, list):
+            return []
+
+        result: List[GranolaAccount] = []
+        for account in accounts_list:
+            if not isinstance(account, dict):
+                continue
+            email = account.get("email")
+            user_id = account.get("userId") or account.get("user_id")
+            tokens_raw = account.get("tokens")
+            if not email or not tokens_raw:
+                continue
+            try:
+                tokens = json.loads(tokens_raw) if isinstance(tokens_raw, str) else tokens_raw
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(tokens, dict):
+                continue
+            access_token = tokens.get("access_token")
+            if not access_token:
+                continue
+            result.append(
+                GranolaAccount(
+                    email=email,
+                    access_token=access_token,
+                    user_id=user_id,
+                    source="stored-accounts",
+                )
+            )
+        return result
+
+    @staticmethod
+    def _parse_supabase_account(json_data: dict) -> Optional[GranolaAccount]:
+        """Parse a single account out of the legacy `supabase.json` body."""
+        access_token = (
+            GranolaAuth._extract_workos(json_data)
+            or GranolaAuth._extract_cognito(json_data)
+        )
+        if not access_token:
+            return None
+
+        email: Optional[str] = None
+        user_id: Optional[str] = None
+        user_info_raw = json_data.get("user_info")
+        if user_info_raw is not None:
+            try:
+                user_info = (
+                    json.loads(user_info_raw) if isinstance(user_info_raw, str) else user_info_raw
+                )
+                if isinstance(user_info, dict):
+                    email = user_info.get("email")
+                    user_id = user_info.get("id")
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if not email:
+            return None
+        return GranolaAccount(
+            email=email, access_token=access_token, user_id=user_id, source="supabase"
+        )
+
+    @staticmethod
+    def _read_json_dict(file_path: str) -> Optional[dict]:
+        """Read a JSON file and return its top-level dict, or None on any failure."""
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.loads(f.read())
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        return data
+
+    @staticmethod
+    def list_accounts() -> List[GranolaAccount]:
+        """
+        Return every Granola account NoteSync can authenticate as.
+
+        Reads `stored-accounts.json` first (multi-account layout), then merges
+        in the legacy `supabase.json` account if it isn't already represented
+        (by user_id or email). Order is preserved: stored-accounts entries
+        come first in the order Granola wrote them.
+
+        Raises:
+            FileNotFoundError: If no candidate config file exists on disk.
+            ValueError: If a config file exists but no recognizable account is found.
+        """
+        stored_path = GranolaAuth._get_stored_accounts_path()
+        supabase_path = GranolaAuth.get_supabase_config_path()
+        candidate_paths = [stored_path, supabase_path]
+
+        any_file_existed = False
+        accounts: List[GranolaAccount] = []
+
+        if os.path.exists(stored_path):
+            any_file_existed = True
+            data = GranolaAuth._read_json_dict(stored_path)
+            if data is not None:
+                accounts.extend(GranolaAuth._parse_stored_accounts(data))
+
+        seen_user_ids = {a.user_id for a in accounts if a.user_id}
+        # Normalize email for case/whitespace-insensitive dedupe. `User@x.com`
+        # and `user@x.com` are the same identity to Granola; treat them so.
+        seen_emails = {a.email.strip().lower() for a in accounts if a.email}
+
+        if os.path.exists(supabase_path):
+            any_file_existed = True
+            data = GranolaAuth._read_json_dict(supabase_path)
+            if data is not None:
+                legacy = GranolaAuth._parse_supabase_account(data)
+                if legacy is not None and not (
+                    (legacy.user_id and legacy.user_id in seen_user_ids)
+                    or legacy.email.strip().lower() in seen_emails
+                ):
+                    accounts.append(legacy)
+
+        if accounts:
+            return accounts
+
+        attempted = "\n  - ".join(candidate_paths)
+        if not any_file_existed:
+            raise FileNotFoundError(
+                f"Granola configuration file not found at any of:\n  - {attempted}\n"
+                "Make sure Granola is installed, running, and that you are logged in to the application."
+            )
+        raise ValueError(
+            f"No Granola accounts found in your local data. Searched:\n  - {attempted}\n"
+            "Make sure Granola is installed, running, and that you are logged in to the application."
+        )
 
     @staticmethod
     def get_access_token() -> str:
         """
-        Get the access token from Granola's local configuration.
+        Get an access token from Granola's local configuration.
+
+        Backward-compatible single-account API. Returns the first available
+        access token found across the candidate files; new multi-account
+        callers should use `list_accounts()` instead.
 
         Tries `stored-accounts.json` first (newer multi-account layout), then
         `supabase.json` (legacy layout). When both files coexist on disk —
@@ -156,13 +299,8 @@ class GranolaAuth:
                 continue
             any_file_existed = True
 
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    json_data = json.loads(f.read())
-            except (OSError, json.JSONDecodeError):
-                continue
-
-            if not isinstance(json_data, dict):
+            json_data = GranolaAuth._read_json_dict(file_path)
+            if json_data is None:
                 continue
 
             for extract in extractors:

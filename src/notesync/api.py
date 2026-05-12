@@ -55,14 +55,23 @@ class GranolaAPI:
     Uses behavior-compatible request and parsing logic.
     """
 
-    def __init__(self, access_token: Optional[str] = None):
+    def __init__(self, access_token: str):
         """
         Initialize the API client.
 
+        The token must be supplied explicitly so multi-account callers can't
+        accidentally drop their per-account context. Use
+        `GranolaAuth.list_accounts()` to discover which token to pass.
+
         Args:
-            access_token: Optional access token. If not provided, will be read from config.
+            access_token: Bearer token to use against api.granola.ai.
         """
-        self.access_token = access_token or GranolaAuth.get_access_token()
+        if not access_token:
+            raise ValueError(
+                "GranolaAPI requires an explicit access_token. "
+                "Use GranolaAuth.list_accounts() to enumerate available accounts."
+            )
+        self.access_token = access_token
         self.session = requests.Session()
         self._setup_session()
 

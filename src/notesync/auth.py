@@ -1,7 +1,8 @@
 """
 Authentication module for NoteSync.
-Reads access tokens from Granola's local configuration file.
-Uses parsing behavior compatible with current Granola local config formats.
+Reads access tokens from Granola's local configuration files.
+Supports the legacy `supabase.json` layout and the newer multi-account
+`stored-accounts.json` layout that ships with recent Granola builds.
 """
 
 import json
@@ -29,7 +30,7 @@ class GranolaAuth:
     @staticmethod
     def _get_config_path(filename: str) -> str:
         """
-        Get the platform-specific path to Granola configuration files.
+        Get the platform-specific path to legacy Granola configuration files.
 
         Args:
             filename: The configuration filename (e.g., "supabase.json", "cache-v3.json")
@@ -48,85 +49,137 @@ class GranolaAuth:
 
     @staticmethod
     def get_supabase_config_path() -> str:
-        """Get the path to the Granola supabase.json file"""
+        """Get the path to the legacy Granola supabase.json file"""
         return GranolaAuth._get_config_path("supabase.json")
+
+    @staticmethod
+    def _get_stored_accounts_path() -> str:
+        """
+        Get the platform-specific path to the newer `stored-accounts.json`
+        file. Linux deliberately uses `~/.config/Granola/` here even though
+        the legacy `supabase.json` lookup keeps its older path — matches
+        where Granola actually writes the new file.
+        """
+        home_dir = Path.home()
+        system = platform.system()
+
+        if system == "Windows":
+            return str(home_dir / "AppData" / "Roaming" / "Granola" / "stored-accounts.json")
+        if system == "Linux":
+            return str(home_dir / ".config" / "Granola" / "stored-accounts.json")
+        return str(home_dir / "Library" / "Application Support" / "Granola" / "stored-accounts.json")
+
+    @staticmethod
+    def _extract_workos(json_data: dict) -> Optional[str]:
+        """Extract access_token from a `workos_tokens` field (supabase.json shape)."""
+        raw = json_data.get("workos_tokens")
+        if not raw:
+            return None
+        try:
+            tokens = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(tokens, dict):
+                return tokens.get("access_token")
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return None
+
+    @staticmethod
+    def _extract_cognito(json_data: dict) -> Optional[str]:
+        """Extract access_token from a `cognito_tokens` field (legacy supabase.json shape)."""
+        raw = json_data.get("cognito_tokens")
+        if not raw:
+            return None
+        try:
+            tokens = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(tokens, dict):
+                return tokens.get("access_token")
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return None
+
+    @staticmethod
+    def _extract_stored_accounts(json_data: dict) -> Optional[str]:
+        """
+        Extract access_token from the multi-account `stored-accounts.json` shape:
+        `{"accounts": "[{\"tokens\": \"{\\\"access_token\\\": ...}\", ...}]"}`.
+        Both `accounts` and each `tokens` field are stringified JSON.
+        Picks the first account; multi-account selection can be added later if needed.
+        """
+        raw = json_data.get("accounts")
+        if not raw:
+            return None
+        try:
+            accounts = json.loads(raw) if isinstance(raw, str) else raw
+            if not isinstance(accounts, list) or not accounts:
+                return None
+            tokens_raw = accounts[0].get("tokens")
+            if not tokens_raw:
+                return None
+            tokens = json.loads(tokens_raw) if isinstance(tokens_raw, str) else tokens_raw
+            if isinstance(tokens, dict):
+                return tokens.get("access_token")
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            pass
+        return None
 
     @staticmethod
     def get_access_token() -> str:
         """
         Get the access token from Granola's local configuration.
 
+        Tries `stored-accounts.json` first (newer multi-account layout), then
+        `supabase.json` (legacy layout). When both files coexist on disk —
+        which happens after a Granola app update leaves the old file behind —
+        the legacy file's tokens are stale, so the newer file must win.
+
         Returns:
             Access token string
 
         Raises:
-            FileNotFoundError: If supabase.json doesn't exist
-            ValueError: If no valid access token is found
+            FileNotFoundError: If no candidate config file exists on disk
+            ValueError: If a config file exists but no recognizable token is found
         """
-        file_path = GranolaAuth.get_supabase_config_path()
+        candidate_paths = [
+            GranolaAuth._get_stored_accounts_path(),
+            GranolaAuth.get_supabase_config_path(),
+        ]
 
-        # Check if file exists
-        if not os.path.exists(file_path):
+        extractors = (
+            GranolaAuth._extract_workos,
+            GranolaAuth._extract_cognito,
+            GranolaAuth._extract_stored_accounts,
+        )
+
+        any_file_existed = False
+        for file_path in candidate_paths:
+            if not os.path.exists(file_path):
+                continue
+            any_file_existed = True
+
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    json_data = json.loads(f.read())
+            except (OSError, json.JSONDecodeError):
+                continue
+
+            if not isinstance(json_data, dict):
+                continue
+
+            for extract in extractors:
+                access_token = extract(json_data)
+                if access_token:
+                    return access_token
+
+        attempted = "\n  - ".join(candidate_paths)
+        if not any_file_existed:
             raise FileNotFoundError(
-                f"Granola configuration file not found at: {file_path}\n"
+                f"Granola configuration file not found at any of:\n  - {attempted}\n"
                 "Make sure Granola is installed, running, and that you are logged in to the application."
             )
-
-        # Read and parse the JSON file
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                file_content = f.read()
-                json_data = json.loads(file_content)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Failed to parse Granola config file: {e}")
-
-        access_token = None
-
-        # Try WorkOS tokens first (updated auth method)
-        if "workos_tokens" in json_data:
-            try:
-                workos_tokens = json_data["workos_tokens"]
-
-                # Handle both string and object formats
-                if isinstance(workos_tokens, str):
-                    workos_tokens = json.loads(workos_tokens)
-                elif isinstance(workos_tokens, dict):
-                    pass  # Already a dict
-                else:
-                    workos_tokens = None
-
-                if workos_tokens and "access_token" in workos_tokens:
-                    access_token = workos_tokens["access_token"]
-            except (json.JSONDecodeError, TypeError, KeyError):
-                # Silently continue to Cognito fallback if WorkOS parsing fails
-                pass
-
-        # Fallback to Cognito tokens for backward compatibility
-        if not access_token and "cognito_tokens" in json_data:
-            try:
-                cognito_tokens = json_data["cognito_tokens"]
-
-                # Handle both string and object formats
-                if isinstance(cognito_tokens, str):
-                    cognito_tokens = json.loads(cognito_tokens)
-                elif isinstance(cognito_tokens, dict):
-                    pass  # Already a dict
-                else:
-                    cognito_tokens = None
-
-                if cognito_tokens and "access_token" in cognito_tokens:
-                    access_token = cognito_tokens["access_token"]
-            except (json.JSONDecodeError, TypeError, KeyError):
-                # Silently continue if Cognito parsing fails
-                pass
-
-        if not access_token:
-            raise ValueError(
-                "Access token not found in your local Granola data. "
-                "Make sure Granola is installed, running, and that you are logged in to the application."
-            )
-
-        return access_token
+        raise ValueError(
+            f"Access token not found in your local Granola data. Searched:\n  - {attempted}\n"
+            "Make sure Granola is installed, running, and that you are logged in to the application."
+        )
 
     @staticmethod
     def get_user_info() -> UserInfo:

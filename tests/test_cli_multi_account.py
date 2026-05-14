@@ -8,6 +8,8 @@ that the *right* engine is constructed with the *right* per-account
 directory and token, in the *right* order.
 """
 
+import base64
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -17,6 +19,21 @@ from click.testing import CliRunner
 from notesync.auth import GranolaAccount
 from notesync.cli import _account_subdir, cli
 from notesync.sync import SYNC_DB_FILENAME
+
+
+def _jwt_with_exp(exp: int) -> str:
+    """Build a JWT-shaped string whose payload carries the given `exp` claim.
+    Stale-token tests need a real JWT shape so `is_token_expired` decodes it
+    — the literal token strings used elsewhere in this file are not JWTs and
+    would be treated as 'fresh' (undecodable)."""
+    def b64(obj):
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+    return f"{b64({'alg':'none'})}.{b64({'exp': exp})}."
+
+
+# Far past / far future relative to any wall-clock time we might run under.
+EXPIRED_JWT = _jwt_with_exp(1)  # 1970
+FRESH_JWT = _jwt_with_exp(9_999_999_999)  # year 2286
 
 
 @pytest.fixture
@@ -220,6 +237,61 @@ def test_accounts_command_json_output(two_accounts):
     assert alice["subdir"] == "alice_example_com"
     assert alice["user_id"] == "u-a"
     assert alice["source"] == "stored-accounts"
+
+
+def test_sync_skips_account_with_expired_token_and_alerts(tmp_path: Path):
+    """
+    Most common production failure: one inactive account's JWT has aged past
+    its 6h TTL because Granola was closed overnight. The active account must
+    still sync, but the run must exit 1 with a recognizable marker line so
+    the cron wrapper routes the alert to the `stale` category — the user
+    explicitly wants to be told even when only one account is stale.
+    """
+    output_dir = tmp_path / "notes"
+    output_dir.mkdir()
+    mixed = [
+        GranolaAccount(email="stale@example.com", access_token=EXPIRED_JWT, user_id="u1"),
+        GranolaAccount(email="fresh@example.com", access_token=FRESH_JWT, user_id="u2"),
+    ]
+
+    FakeEngine, engines = _mock_engine_factory()
+
+    with patch("notesync.cli.GranolaAuth.list_accounts", return_value=mixed), \
+         patch("notesync.cli.GranolaAPI", side_effect=lambda access_token=None: MagicMock(access_token=access_token)), \
+         patch("notesync.cli.ExportEngine", FakeEngine):
+        result = CliRunner().invoke(cli, ["sync", str(output_dir)])
+
+    # Exit 1 so the wrapper alerts; the fresh account still synced.
+    assert result.exit_code == 1, result.output
+    assert len(engines) == 1
+    assert engines[0].sync_calls[0]["output_dir"] == str(output_dir / "fresh_example_com")
+    # Marker line is the contract with the wrapper's `stale` category check.
+    assert "Stale-token: stale@example.com" in result.output
+    # And NOT the "Error syncing …: 401" prose that would route to auth.
+    assert "Error syncing stale@example.com" not in result.output
+
+
+def test_sync_all_stale_exits_non_zero(tmp_path: Path):
+    """All accounts stale: no engines run, exit 1, every account surfaced on
+    its own Stale-token line so the wrapper still maps to `stale`."""
+    output_dir = tmp_path / "notes"
+    output_dir.mkdir()
+    all_stale = [
+        GranolaAccount(email="a@x.com", access_token=EXPIRED_JWT, user_id="u1"),
+        GranolaAccount(email="b@x.com", access_token=EXPIRED_JWT, user_id="u2"),
+    ]
+
+    FakeEngine, engines = _mock_engine_factory()
+
+    with patch("notesync.cli.GranolaAuth.list_accounts", return_value=all_stale), \
+         patch("notesync.cli.GranolaAPI", MagicMock()), \
+         patch("notesync.cli.ExportEngine", FakeEngine):
+        result = CliRunner().invoke(cli, ["sync", str(output_dir)])
+
+    assert result.exit_code == 1
+    assert len(engines) == 0
+    assert "Stale-token: a@x.com" in result.output
+    assert "Stale-token: b@x.com" in result.output
 
 
 def test_sync_one_account_failure_does_not_block_others(tmp_path: Path, two_accounts):

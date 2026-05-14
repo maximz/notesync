@@ -5,9 +5,11 @@ Supports the legacy `supabase.json` layout and the newer multi-account
 `stored-accounts.json` layout that ships with recent Granola builds.
 """
 
+import base64
 import json
 import os
 import platform
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -31,6 +33,49 @@ class GranolaAccount:
     access_token: str
     user_id: Optional[str] = None
     source: str = "stored-accounts"  # "stored-accounts" or "supabase"
+
+
+def jwt_expires_at(access_token: str) -> Optional[int]:
+    """
+    Return the `exp` claim (unix seconds) from a JWT access token, or None
+    if the token can't be decoded or has no `exp`. Signature is NOT verified —
+    we're inspecting our own stored credentials only to decide whether to
+    bother making an API call that will 401.
+    """
+    if not access_token or not isinstance(access_token, str):
+        return None
+    parts = access_token.split(".")
+    if len(parts) != 3:
+        return None
+    payload_b64 = parts[1]
+    # base64url, no padding — pad to a multiple of 4 before decoding.
+    padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+    try:
+        payload_bytes = base64.urlsafe_b64decode(padded)
+        payload = json.loads(payload_bytes)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    exp = payload.get("exp")
+    if not isinstance(exp, (int, float)):
+        return None
+    return int(exp)
+
+
+def is_token_expired(access_token: str, *, now: Optional[int] = None, buffer_seconds: int = 60) -> bool:
+    """
+    True iff the JWT `exp` claim is in the past (with `buffer_seconds` of slack
+    to avoid racing the API on near-expiry). Tokens we can't decode are treated
+    as fresh — we'd rather attempt the call and surface a real 401 than skip
+    accounts because of a parsing bug here.
+    """
+    exp = jwt_expires_at(access_token)
+    if exp is None:
+        return False
+    if now is None:
+        now = int(time.time())
+    return exp - buffer_seconds <= now
 
 
 class GranolaAuth:

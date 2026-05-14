@@ -1,9 +1,21 @@
+import base64
 import json
 from pathlib import Path
 
 import pytest
 
-from notesync.auth import GranolaAccount, GranolaAuth
+from notesync.auth import GranolaAccount, GranolaAuth, is_token_expired, jwt_expires_at
+
+
+def _make_jwt(payload: dict) -> str:
+    """Build a syntactically valid JWT (header.payload.sig) with the given
+    payload. Signature is empty — we don't verify, we only decode."""
+    def b64(obj):
+        raw = json.dumps(obj).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    header = b64({"alg": "none", "typ": "JWT"})
+    body = b64(payload)
+    return f"{header}.{body}."
 
 
 @pytest.fixture
@@ -296,3 +308,53 @@ def test_list_accounts_returns_dataclass_instances(auth_paths):
     accounts = GranolaAuth.list_accounts()
     assert isinstance(accounts[0], GranolaAccount)
     assert accounts[0].user_id == "u"
+
+
+# ---------------------------------------------------------------------------
+# JWT expiry inspection
+# ---------------------------------------------------------------------------
+
+
+def test_jwt_expires_at_returns_exp_claim():
+    token = _make_jwt({"exp": 1_700_000_000, "iat": 1_699_000_000})
+    assert jwt_expires_at(token) == 1_700_000_000
+
+
+def test_jwt_expires_at_returns_none_for_garbage_token():
+    assert jwt_expires_at("not-a-jwt") is None
+    assert jwt_expires_at("") is None
+    assert jwt_expires_at("a.b") is None  # missing third segment
+    # Valid 3-segment shape but payload isn't base64-decodable JSON.
+    assert jwt_expires_at("aaa.@@@.bbb") is None
+
+
+def test_jwt_expires_at_returns_none_when_exp_absent_or_non_numeric():
+    no_exp = _make_jwt({"iat": 1_700_000_000})
+    assert jwt_expires_at(no_exp) is None
+    bad_exp = _make_jwt({"exp": "not-a-number"})
+    assert jwt_expires_at(bad_exp) is None
+
+
+def test_is_token_expired_when_exp_in_past():
+    token = _make_jwt({"exp": 100})
+    assert is_token_expired(token, now=1_000_000) is True
+
+
+def test_is_token_expired_false_when_exp_in_future():
+    token = _make_jwt({"exp": 2_000_000})
+    assert is_token_expired(token, now=1_000_000) is False
+
+
+def test_is_token_expired_buffer_skips_near_expiry_tokens():
+    """A token expiring within the buffer is treated as already expired so we
+    don't race the API and 401 mid-request."""
+    token = _make_jwt({"exp": 1_000_030})  # 30s away
+    assert is_token_expired(token, now=1_000_000, buffer_seconds=60) is True
+    assert is_token_expired(token, now=1_000_000, buffer_seconds=10) is False
+
+
+def test_is_token_expired_treats_undecodable_as_fresh():
+    """If we can't read `exp` we'd rather attempt the call and surface a real
+    401 than silently skip the account because of a decoder edge case."""
+    assert is_token_expired("garbage", now=1_000_000) is False
+    assert is_token_expired("", now=1_000_000) is False

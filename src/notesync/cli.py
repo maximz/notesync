@@ -13,7 +13,7 @@ from rich.table import Table
 
 from . import __version__
 from .api import GranolaAPI
-from .auth import GranolaAccount, GranolaAuth
+from .auth import GranolaAccount, GranolaAuth, is_token_expired
 from .export import ExportEngine
 from .sync import SYNC_DB_FILENAME, SyncDatabase
 
@@ -63,6 +63,26 @@ def _resolve_accounts(account: Optional[str]) -> List[GranolaAccount]:
         )
         sys.exit(1)
     return matches
+
+
+def _partition_fresh_tokens(
+    accounts: List[GranolaAccount],
+) -> tuple[List[GranolaAccount], List[GranolaAccount]]:
+    """
+    Split accounts into (fresh, stale) by JWT `exp` claim. Stale tokens are
+    accounts Granola has stopped refreshing in the background — calling the
+    API with them produces a 401. Skipping them up-front keeps a stale
+    inactive account from poisoning every cron run with a spurious auth
+    alert while the active account is still syncing fine.
+    """
+    fresh: List[GranolaAccount] = []
+    stale: List[GranolaAccount] = []
+    for acc in accounts:
+        if is_token_expired(acc.access_token):
+            stale.append(acc)
+        else:
+            fresh.append(acc)
+    return fresh, stale
 
 
 def _check_subdir_collisions(accounts: List[GranolaAccount]) -> None:
@@ -258,12 +278,27 @@ def sync(
             )
             sys.exit(1)
 
+        # Pre-flight: classify accounts by JWT `exp` so we skip the ones
+        # Granola has stopped refreshing in the background (the 6h TTL ages
+        # out whenever the app is closed long enough). Calling the API with a
+        # known-expired token just produces a 401 — better to skip up front
+        # with a recognizable marker the wrapper can route to a dedicated
+        # "stale-token" alert (distinct from a real 401 with a valid JWT).
+        fresh_accounts, stale_accounts = _partition_fresh_tokens(accounts_to_sync)
+        for acc in stale_accounts:
+            # Marker line "Stale-token: <email>" is what the wrapper greps for
+            # to pick the `stale` alert category. Keep the prefix stable.
+            err_console.print(
+                f"[yellow]Stale-token: {acc.email} — access token has expired. "
+                f"Open Granola.app (and switch to this account) to refresh it.[/yellow]"
+            )
+
         # Per-account isolation: one account's failure shouldn't abort the
-        # others (common case: one stale token in a multi-account setup).
-        # Exit non-zero whenever *any* account fails so the wrapper's alert
-        # path fires; a complete outage is just the worst case of that.
+        # others. Exit non-zero whenever *any* account fails OR any token was
+        # stale (the user wants the wrapper to alert on stale tokens too —
+        # a stale inactive account means a sync gap until they open Granola).
         failures: list = []
-        for acc in accounts_to_sync:
+        for acc in fresh_accounts:
             subdir = output_dir / _account_subdir(acc)
             console.print(
                 f"[bold blue]── Syncing account: {acc.email} → {subdir} ──[/bold blue]"
@@ -291,10 +326,10 @@ def sync(
 
         if failures:
             err_console.print(
-                f"[bold red]{len(failures)}/{len(accounts_to_sync)} account(s) failed:[/bold red] "
+                f"[bold red]{len(failures)}/{len(fresh_accounts)} account(s) failed:[/bold red] "
                 + ", ".join(email for email, _ in failures)
             )
-        sys.exit(0 if not failures else 1)
+        sys.exit(0 if not failures and not stale_accounts else 1)
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Sync interrupted by user[/yellow]")

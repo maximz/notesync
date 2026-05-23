@@ -9,10 +9,13 @@ import base64
 import json
 import os
 import platform
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
+
+from notesync import safestorage
 
 
 class UserInfo:
@@ -250,14 +253,103 @@ class GranolaAuth:
         return data
 
     @staticmethod
+    def _encrypted_path(plain_path: str) -> str:
+        """The encrypted `.enc` sibling of a plaintext Granola config path."""
+        return plain_path + ".enc"
+
+    @staticmethod
+    def _granola_config_exists(plain_path: str) -> bool:
+        """True if the plaintext file or its encrypted `.enc` sibling exists."""
+        return os.path.exists(plain_path) or os.path.exists(
+            GranolaAuth._encrypted_path(plain_path)
+        )
+
+    @staticmethod
+    def _read_granola_json(plain_path: str) -> Optional[dict]:
+        """
+        Read a Granola config file as a dict, preferring the encrypted `.enc`
+        sibling when present.
+
+        Modern Granola desktop writes only the encrypted files and leaves the
+        old plaintext copies frozen (and therefore stale), so when both exist
+        the `.enc` copy is authoritative. Falls back to the plaintext file for
+        older builds, or when decryption is unavailable (non-macOS, missing
+        Keychain entry not yet approved); the decrypt failure is surfaced on
+        stderr so the cause isn't silently masked by a stale plaintext token.
+        """
+        enc_path = GranolaAuth._encrypted_path(plain_path)
+        if os.path.exists(enc_path):
+            if safestorage.is_supported():
+                try:
+                    return safestorage.load_encrypted_json(enc_path)
+                except safestorage.SafeStorageError as e:
+                    sys.stderr.write(f"notesync: could not read {enc_path}: {e}\n")
+                    # Fall through to plaintext (present on transitional installs).
+            elif not os.path.exists(plain_path):
+                # Encrypted-only store on a platform we can't decrypt: say so,
+                # otherwise the caller raises a misleading "not logged in" error.
+                sys.stderr.write(
+                    f"notesync: {enc_path} is encrypted and decryption is not "
+                    "supported on this platform; no plaintext fallback found\n"
+                )
+        return GranolaAuth._read_json_dict(plain_path)
+
+    @staticmethod
+    def _merge_legacy_account(
+        accounts: List[GranolaAccount], legacy: GranolaAccount
+    ) -> List[GranolaAccount]:
+        """
+        Merge the legacy `supabase.json` account into the `stored-accounts.json`
+        list, deduping by identity (user_id, else normalized email).
+
+        Recent Granola builds keep only the *active* account's token fresh in
+        `supabase.json` and stop rewriting that identity's entry in
+        `stored-accounts.json`, so the stored copy can be expired while the
+        legacy copy is current. When the same identity appears in both, keep
+        whichever token is still valid — replacing an expired stored token with
+        a fresh legacy one. With no identity match, append the legacy account.
+        """
+
+        def same_identity(existing: GranolaAccount) -> bool:
+            if legacy.user_id and existing.user_id and existing.user_id == legacy.user_id:
+                return True
+            return existing.email.strip().lower() == legacy.email.strip().lower()
+
+        # A legacy identity already present in stored-accounts is never appended
+        # (that would duplicate it). Scan every entry -- not just the first match
+        # -- so an unusual multi-entry layout can't leak a duplicate, and swap
+        # the first expired match for the fresh legacy token. An undecodable
+        # token counts as fresh, so dummy/non-JWT tokens keep the stored entry
+        # (preserving prior dedupe behavior).
+        matched = False
+        swapped = False
+        for i, existing in enumerate(accounts):
+            if not same_identity(existing):
+                continue
+            matched = True
+            if (
+                not swapped
+                and is_token_expired(existing.access_token)
+                and not is_token_expired(legacy.access_token)
+            ):
+                accounts[i] = legacy
+                swapped = True
+
+        if not matched:
+            accounts.append(legacy)
+        return accounts
+
+    @staticmethod
     def list_accounts() -> List[GranolaAccount]:
         """
         Return every Granola account NoteSync can authenticate as.
 
         Reads `stored-accounts.json` first (multi-account layout), then merges
-        in the legacy `supabase.json` account if it isn't already represented
-        (by user_id or email). Order is preserved: stored-accounts entries
-        come first in the order Granola wrote them.
+        in the legacy `supabase.json` account. A distinct identity is appended;
+        a duplicate identity is deduped (by user_id, else email), keeping the
+        non-expired token so a fresh legacy copy can rescue an expired stored
+        one. Order is preserved: stored-accounts entries come first in the order
+        Granola wrote them.
 
         Raises:
             FileNotFoundError: If no candidate config file exists on disk.
@@ -270,27 +362,19 @@ class GranolaAuth:
         any_file_existed = False
         accounts: List[GranolaAccount] = []
 
-        if os.path.exists(stored_path):
+        if GranolaAuth._granola_config_exists(stored_path):
             any_file_existed = True
-            data = GranolaAuth._read_json_dict(stored_path)
+            data = GranolaAuth._read_granola_json(stored_path)
             if data is not None:
                 accounts.extend(GranolaAuth._parse_stored_accounts(data))
 
-        seen_user_ids = {a.user_id for a in accounts if a.user_id}
-        # Normalize email for case/whitespace-insensitive dedupe. `User@x.com`
-        # and `user@x.com` are the same identity to Granola; treat them so.
-        seen_emails = {a.email.strip().lower() for a in accounts if a.email}
-
-        if os.path.exists(supabase_path):
+        if GranolaAuth._granola_config_exists(supabase_path):
             any_file_existed = True
-            data = GranolaAuth._read_json_dict(supabase_path)
+            data = GranolaAuth._read_granola_json(supabase_path)
             if data is not None:
                 legacy = GranolaAuth._parse_supabase_account(data)
-                if legacy is not None and not (
-                    (legacy.user_id and legacy.user_id in seen_user_ids)
-                    or legacy.email.strip().lower() in seen_emails
-                ):
-                    accounts.append(legacy)
+                if legacy is not None:
+                    accounts = GranolaAuth._merge_legacy_account(accounts, legacy)
 
         if accounts:
             return accounts
@@ -340,11 +424,11 @@ class GranolaAuth:
 
         any_file_existed = False
         for file_path in candidate_paths:
-            if not os.path.exists(file_path):
+            if not GranolaAuth._granola_config_exists(file_path):
                 continue
             any_file_existed = True
 
-            json_data = GranolaAuth._read_json_dict(file_path)
+            json_data = GranolaAuth._read_granola_json(file_path)
             if json_data is None:
                 continue
 
@@ -378,18 +462,18 @@ class GranolaAuth:
         """
         file_path = GranolaAuth.get_supabase_config_path()
 
-        # Check if file exists
-        if not os.path.exists(file_path):
+        # Check if file exists (plaintext or encrypted sibling)
+        if not GranolaAuth._granola_config_exists(file_path):
             raise FileNotFoundError(
                 f"Granola configuration file not found at: {file_path}\n"
                 "Make sure Granola is installed, running, and that you are logged in to the application."
             )
 
         try:
-            # Read and parse the JSON file
-            with open(file_path, "r", encoding="utf-8") as f:
-                file_content = f.read()
-                json_data = json.loads(file_content)
+            # Read and parse the config (prefers the encrypted `.enc` sibling)
+            json_data = GranolaAuth._read_granola_json(file_path)
+            if json_data is None:
+                raise ValueError("could not read Granola configuration")
 
             # Handle user_info which could be either a JSON string or an object
             user_info_data = json_data.get("user_info")

@@ -2,7 +2,7 @@
 
 Export and sync your [Granola](https://www.granola.ai/) meeting notes and transcripts to local markdown files.
 
-A Python CLI tool inspired by the Granola extension for Raycast, designed for reliable automated backups via cron.
+A Python CLI tool inspired by the Granola extension for Raycast, designed for reliable automated backups via cron or launchd.
 
 ## Disclaimer
 
@@ -47,6 +47,10 @@ uv sync
 # Verify installation
 uv run notesync --version
 ```
+
+### First run on macOS: Keychain access
+
+Recent Granola builds encrypt their local token store. The first command that reads it triggers a one-time macOS Keychain prompt for `Granola Safe Storage` — click **Always Allow** so later runs don't reprompt. Decryption is read-only and never touches Granola's auth flow. Note: scheduled syncs on macOS must run from a launchd LaunchAgent, not plain `cron`, which can't reach the login Keychain (see the automation sections below). See [Authentication](#authentication) for details.
 
 ## Quick Start
 
@@ -379,7 +383,23 @@ SCRIPT
 chmod +x ~/bin/sync_notesync.sh
 ```
 
-#### 5. Set Up Cron Job
+#### 5. Schedule the Sync
+
+> **macOS + recent Granola (encrypted store):** plain `cron` jobs run outside your login session and **cannot read the login Keychain**, so they can't decrypt Granola's tokens — the sync fails or falls back to stale plaintext. Use a **launchd LaunchAgent** instead (it runs in your login session). Run the script once manually first and click **Always Allow** on the `Granola Safe Storage` prompt, then:
+>
+> ```xml
+> <!-- ~/Library/LaunchAgents/com.example.notesync.plist -->
+> <?xml version="1.0" encoding="UTF-8"?>
+> <plist version="1.0"><dict>
+>   <key>Label</key><string>com.example.notesync</string>
+>   <key>ProgramArguments</key><array><string>/Users/you/bin/sync_notesync.sh</string></array>
+>   <key>StartCalendarInterval</key><dict><key>Minute</key><integer>0</integer></dict>
+>   <key>StandardErrorPath</key><string>/tmp/notesync.err</string>
+>   <key>StandardOutPath</key><string>/tmp/notesync.out</string>
+> </dict></plist>
+> ```
+>
+> Load it with `launchctl load ~/Library/LaunchAgents/com.example.notesync.plist`. The plain-cron setup below is fine on Linux, or on macOS with older (plaintext) Granola builds.
 
 Add the sync script to cron:
 
@@ -531,6 +551,8 @@ The per-account `.notesync-sync.db` files exist locally but are ignored by Git, 
 
 Use this if you only want periodic local exports and do not want automatic git commit/push.
 
+> **macOS + recent Granola:** as above, plain `cron` can't decrypt the Keychain-protected store — schedule via a launchd LaunchAgent instead (see [Schedule the Sync](#5-schedule-the-sync)). The crontab below applies to Linux or older (plaintext) Granola builds.
+
 ```bash
 # Find the absolute binary path once
 command -v notesync
@@ -634,6 +656,8 @@ NoteSync reads authentication credentials from the Granola desktop app's local c
 - `stored-accounts.json` (recent Granola builds, one entry per signed-in account)
 - `supabase.json` (legacy single-account layout)
 
+**Encrypted store (recent Granola builds, macOS):** newer Granola versions encrypt these files (`stored-accounts.json.enc`, `supabase.json.enc`) and stop updating the plaintext copies. NoteSync transparently decrypts them using Granola's own key from the macOS Keychain (a `storage.dek` data key unwrapped via the `Granola Safe Storage` Keychain entry, then AES-256-GCM), preferring the `.enc` files over any stale plaintext. The first run triggers a one-time Keychain prompt — click **Always Allow** so later runs don't reprompt. Decryption is read-only and never refreshes or rotates tokens, so it can't sign your desktop app out. Falls back to plaintext on older Granola builds or non-macOS platforms. This requires the `cryptography` package, installed automatically with NoteSync.
+
 Per platform:
 
 - **macOS**: `~/Library/Application Support/Granola/`
@@ -715,6 +739,15 @@ The CLI is behaviorally compatible with the same Granola API endpoints used by t
 1. Make sure you're logged into Granola
 2. Try logging out and logging back in
 3. Check that Granola is running
+
+### "could not read ...stored-accounts.json.enc" / repeated Keychain prompts
+
+**Cause**: Granola's encrypted store needs macOS Keychain access that wasn't granted (or only "Allow", not "Always Allow", was clicked).
+
+**Solution**:
+1. Run `notesync accounts` and click **Always Allow** on the `Granola Safe Storage` dialog.
+2. For automation, run the job in your login session (e.g. a launchd LaunchAgent), not plain cron — plain cron can't reach the login Keychain.
+3. If a token shows expired even after decrypting, open Granola briefly so it refreshes — notesync only reads tokens, it never refreshes them.
 
 ### "Failed to fetch documents"
 

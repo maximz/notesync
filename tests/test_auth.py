@@ -3,7 +3,9 @@ import json
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from notesync import safestorage
 from notesync.auth import GranolaAccount, GranolaAuth, is_token_expired, jwt_expires_at
 
 
@@ -275,6 +277,87 @@ def test_list_accounts_deduplicates_legacy_by_email(auth_paths):
     assert accounts[0].email == "dup@x.com"
 
 
+def test_list_accounts_prefers_fresh_legacy_when_stored_token_expired(auth_paths):
+    """
+    Recent Granola builds refresh only the active account's token in
+    `supabase.json` while leaving `stored-accounts.json` stale. When the same
+    identity is expired in stored-accounts but fresh in supabase, list_accounts
+    must swap in the fresh legacy token (rather than keep the dead stored one).
+    """
+    supabase, stored_accounts = auth_paths
+    expired = _make_jwt({"exp": 100})  # 1970 -> long expired
+    fresh = _make_jwt({"exp": 9_999_999_999})  # year 2286 -> valid
+    stored_accounts.write_text(
+        json.dumps(
+            {
+                "accounts": json.dumps(
+                    [_account_entry(user_id="shared-id", email="shared@x.com", access_token=expired)]
+                )
+            }
+        )
+    )
+    supabase.write_text(
+        json.dumps(_supabase_with_user_info(user_id="shared-id", email="shared@x.com", access_token=fresh))
+    )
+
+    accounts = GranolaAuth.list_accounts()
+    assert len(accounts) == 1
+    assert accounts[0].email == "shared@x.com"
+    assert accounts[0].access_token == fresh
+    assert accounts[0].source == "supabase"
+
+
+def test_list_accounts_keeps_stored_when_both_tokens_expired(auth_paths):
+    """If both copies of an identity are expired, don't churn the entry: keep
+    the stored-accounts one (a swap would buy nothing)."""
+    supabase, stored_accounts = auth_paths
+    stored_expired = _make_jwt({"exp": 100})
+    legacy_expired = _make_jwt({"exp": 200})
+    stored_accounts.write_text(
+        json.dumps(
+            {
+                "accounts": json.dumps(
+                    [_account_entry(user_id="shared-id", email="shared@x.com", access_token=stored_expired)]
+                )
+            }
+        )
+    )
+    supabase.write_text(
+        json.dumps(_supabase_with_user_info(user_id="shared-id", email="shared@x.com", access_token=legacy_expired))
+    )
+
+    accounts = GranolaAuth.list_accounts()
+    assert len(accounts) == 1
+    assert accounts[0].access_token == stored_expired
+    assert accounts[0].source == "stored-accounts"
+
+
+def test_list_accounts_no_duplicate_when_multiple_stored_match_legacy(auth_paths):
+    """If two stored entries both match the legacy identity (one by user_id,
+    one by email), the legacy entry must not be appended as a third copy."""
+    supabase, stored_accounts = auth_paths
+    stored_accounts.write_text(
+        json.dumps(
+            {
+                "accounts": json.dumps(
+                    [
+                        _account_entry(user_id="shared-id", email="other@x.com", access_token="tok-1"),
+                        _account_entry(user_id="different-id", email="dup@x.com", access_token="tok-2"),
+                    ]
+                )
+            }
+        )
+    )
+    supabase.write_text(
+        json.dumps(_supabase_with_user_info(user_id="shared-id", email="dup@x.com", access_token="tok-legacy"))
+    )
+
+    accounts = GranolaAuth.list_accounts()
+    # Legacy matches entry 0 by user_id and entry 1 by email -> not appended.
+    assert len(accounts) == 2
+    assert all(a.source == "stored-accounts" for a in accounts)
+
+
 def test_list_accounts_raises_file_not_found_when_no_files(auth_paths):
     with pytest.raises(FileNotFoundError):
         GranolaAuth.list_accounts()
@@ -358,3 +441,96 @@ def test_is_token_expired_treats_undecodable_as_fresh():
     401 than silently skip the account because of a decoder edge case."""
     assert is_token_expired("garbage", now=1_000_000) is False
     assert is_token_expired("", now=1_000_000) is False
+
+
+# ---------------------------------------------------------------------------
+# Encrypted store (.enc) reading
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def enc_env(monkeypatch):
+    """Fixed DEK via override + force the platform check on, so .enc reading
+    works on any CI host. Returns the 32-byte DEK for sealing fixtures."""
+    dek = bytes(range(32))
+    monkeypatch.setenv("NOTESYNC_GRANOLA_DEK", base64.b64encode(dek).decode())
+    monkeypatch.setattr(safestorage, "is_supported", lambda: True)
+    safestorage.reset_cache()
+    yield dek
+    safestorage.reset_cache()
+
+
+def _seal(obj: dict, dek: bytes) -> bytes:
+    nonce = b"\x00" * 12
+    return nonce + AESGCM(dek).encrypt(nonce, json.dumps(obj).encode(), None)
+
+
+def test_list_accounts_reads_encrypted_stored_accounts(auth_paths, enc_env):
+    """When only the encrypted stored-accounts file exists, decrypt and use it."""
+    _, stored_accounts = auth_paths
+    enc = Path(str(stored_accounts) + ".enc")
+    enc.write_bytes(
+        _seal(
+            {"accounts": json.dumps(
+                [_account_entry(user_id="u1", email="a@x.com", access_token="tok-a")]
+            )},
+            enc_env,
+        )
+    )
+
+    accounts = GranolaAuth.list_accounts()
+    assert [(a.email, a.access_token, a.source) for a in accounts] == [
+        ("a@x.com", "tok-a", "stored-accounts")
+    ]
+
+
+def test_encrypted_stored_accounts_wins_over_stale_plaintext(auth_paths, enc_env):
+    """Both files present: the encrypted copy is authoritative; plaintext is
+    the frozen orphan modern Granola leaves behind."""
+    _, stored_accounts = auth_paths
+    stored_accounts.write_text(
+        json.dumps(
+            {"accounts": json.dumps(
+                [_account_entry(user_id="u1", email="a@x.com", access_token="STALE-plaintext")]
+            )}
+        )
+    )
+    Path(str(stored_accounts) + ".enc").write_bytes(
+        _seal(
+            {"accounts": json.dumps(
+                [_account_entry(user_id="u1", email="a@x.com", access_token="FRESH-encrypted")]
+            )},
+            enc_env,
+        )
+    )
+
+    accounts = GranolaAuth.list_accounts()
+    assert len(accounts) == 1
+    assert accounts[0].access_token == "FRESH-encrypted"
+
+
+def test_encrypted_decrypt_failure_falls_back_to_plaintext(auth_paths, enc_env, capsys):
+    """A corrupt/unreadable .enc should not wipe out a usable plaintext; the
+    cause is reported on stderr rather than silently swallowed."""
+    _, stored_accounts = auth_paths
+    stored_accounts.write_text(
+        json.dumps(
+            {"accounts": json.dumps(
+                [_account_entry(user_id="u1", email="a@x.com", access_token="plaintext-fallback")]
+            )}
+        )
+    )
+    Path(str(stored_accounts) + ".enc").write_bytes(b"not-a-valid-gcm-envelope")
+
+    accounts = GranolaAuth.list_accounts()
+    assert accounts[0].access_token == "plaintext-fallback"
+    assert "could not read" in capsys.readouterr().err
+
+
+def test_get_access_token_reads_encrypted_supabase(auth_paths, enc_env):
+    """Single-account API also honors the encrypted store."""
+    supabase, _ = auth_paths
+    Path(str(supabase) + ".enc").write_bytes(
+        _seal({"workos_tokens": {"access_token": "enc-workos"}}, enc_env)
+    )
+    assert GranolaAuth.get_access_token() == "enc-workos"

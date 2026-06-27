@@ -31,6 +31,12 @@ API_CONFIG = {
     "CLIENT_VERSION": "6.72.0",
 }
 
+# (connect, read) timeout in seconds for every request. Without this, a stalled
+# socket read hangs the sync forever -- the failure mode that froze the
+# scheduled granola sync for days. Bounds each attempt so retries/backoff and
+# the outer cron timeout can do their job.
+DEFAULT_REQUEST_TIMEOUT = (10, 60)
+
 
 def get_user_agent() -> str:
     """
@@ -161,6 +167,10 @@ class GranolaAPI:
             requests.RequestException: If all retries fail
         """
         last_exception = None
+
+        # Bound every attempt so a stalled connection can't hang forever.
+        # Callers may still override per-request.
+        kwargs.setdefault("timeout", DEFAULT_REQUEST_TIMEOUT)
 
         for attempt in range(max_retries):
             try:

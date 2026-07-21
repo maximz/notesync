@@ -36,6 +36,7 @@ class GranolaAccount:
     access_token: str
     user_id: Optional[str] = None
     source: str = "stored-accounts"  # "stored-accounts" or "supabase"
+    refresh_token: Optional[str] = None
 
 
 def jwt_expires_at(access_token: str) -> Optional[int]:
@@ -129,32 +130,44 @@ class GranolaAuth:
         return str(home_dir / "Library" / "Application Support" / "Granola" / "stored-accounts.json")
 
     @staticmethod
-    def _extract_workos(json_data: dict) -> Optional[str]:
-        """Extract access_token from a `workos_tokens` field (supabase.json shape)."""
+    def _extract_workos_tokens(json_data: dict) -> tuple[Optional[str], Optional[str]]:
+        """Extract (access_token, refresh_token) from a `workos_tokens` field."""
         raw = json_data.get("workos_tokens")
         if not raw:
-            return None
+            return None, None
         try:
             tokens = json.loads(raw) if isinstance(raw, str) else raw
             if isinstance(tokens, dict):
-                return tokens.get("access_token")
+                return tokens.get("access_token"), tokens.get("refresh_token")
         except (json.JSONDecodeError, TypeError):
             pass
-        return None
+        return None, None
+
+    @staticmethod
+    def _extract_workos(json_data: dict) -> Optional[str]:
+        """Extract access_token from a `workos_tokens` field (supabase.json shape)."""
+        access_token, _ = GranolaAuth._extract_workos_tokens(json_data)
+        return access_token
+
+    @staticmethod
+    def _extract_cognito_tokens(json_data: dict) -> tuple[Optional[str], Optional[str]]:
+        """Extract (access_token, refresh_token) from a `cognito_tokens` field."""
+        raw = json_data.get("cognito_tokens")
+        if not raw:
+            return None, None
+        try:
+            tokens = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(tokens, dict):
+                return tokens.get("access_token"), tokens.get("refresh_token")
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return None, None
 
     @staticmethod
     def _extract_cognito(json_data: dict) -> Optional[str]:
         """Extract access_token from a `cognito_tokens` field (legacy supabase.json shape)."""
-        raw = json_data.get("cognito_tokens")
-        if not raw:
-            return None
-        try:
-            tokens = json.loads(raw) if isinstance(raw, str) else raw
-            if isinstance(tokens, dict):
-                return tokens.get("access_token")
-        except (json.JSONDecodeError, TypeError):
-            pass
-        return None
+        access_token, _ = GranolaAuth._extract_cognito_tokens(json_data)
+        return access_token
 
     @staticmethod
     def _extract_stored_accounts(json_data: dict) -> Optional[str]:
@@ -207,6 +220,7 @@ class GranolaAuth:
                     access_token=access_token,
                     user_id=user_id,
                     source="stored-accounts",
+                    refresh_token=tokens.get("refresh_token"),
                 )
             )
         return result
@@ -214,11 +228,15 @@ class GranolaAuth:
     @staticmethod
     def _parse_supabase_account(json_data: dict) -> Optional[GranolaAccount]:
         """Parse a single account out of the legacy `supabase.json` body."""
-        access_token = (
-            GranolaAuth._extract_workos(json_data)
-            or GranolaAuth._extract_cognito(json_data)
-        )
-        if not access_token:
+        workos_access, workos_refresh = GranolaAuth._extract_workos_tokens(json_data)
+        cognito_access, cognito_refresh = GranolaAuth._extract_cognito_tokens(json_data)
+        if workos_access:
+            access_token = workos_access
+            refresh_token = workos_refresh
+        elif cognito_access:
+            access_token = cognito_access
+            refresh_token = cognito_refresh
+        else:
             return None
 
         email: Optional[str] = None
@@ -237,7 +255,11 @@ class GranolaAuth:
         if not email:
             return None
         return GranolaAccount(
-            email=email, access_token=access_token, user_id=user_id, source="supabase"
+            email=email,
+            access_token=access_token,
+            user_id=user_id,
+            source="supabase",
+            refresh_token=refresh_token,
         )
 
     @staticmethod

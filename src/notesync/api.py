@@ -28,7 +28,9 @@ API_CONFIG = {
     "API_URL": "https://api.granola.ai/v1",
     "API_URL_V2": "https://api.granola.ai/v2",
     "STREAM_API_URL": "https://stream.api.granola.ai/v1",
-    "CLIENT_VERSION": "6.72.0",
+    # Keep aligned with the current Granola desktop build so requests (and the
+    # token-refresh call) present a recent, unremarkable client version.
+    "CLIENT_VERSION": "7.427.8",
 }
 
 # (connect, read) timeout in seconds for every request. Without this, a stalled
@@ -45,8 +47,8 @@ def get_user_agent() -> str:
     version = API_CONFIG["CLIENT_VERSION"]
     return (
         f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-        f"(KHTML, like Gecko) Granola/{version} Chrome/136.0.7103.115 "
-        f"Electron/36.3.2 Safari/537.36"
+        f"(KHTML, like Gecko) Granola/{version} Chrome/148.0.7778.265 "
+        f"Electron/42.4.1 Safari/537.36"
     )
 
 

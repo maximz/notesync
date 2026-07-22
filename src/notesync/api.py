@@ -27,43 +27,63 @@ from .models import (
 # API configuration aligned with the observed Granola desktop client behavior.
 # ============================================================================
 
-# Fallback client version used off macOS, when Granola isn't installed, or if
-# the app's Info.plist can't be read. Bump occasionally to stay recent.
+# Fallbacks used off macOS, when Granola isn't installed, or if a plist can't
+# be read. Bump occasionally to stay recent.
 _FALLBACK_CLIENT_VERSION = "7.427.8"
+_FALLBACK_ELECTRON_VERSION = "42.4.1"
 _GRANOLA_INFO_PLIST = Path("/Applications/Granola.app/Contents/Info.plist")
+_ELECTRON_INFO_PLIST = Path(
+    "/Applications/Granola.app/Contents/Frameworks/"
+    "Electron Framework.framework/Resources/Info.plist"
+)
+
+
+def _read_plist_string(plist_path: Path, key: str) -> Optional[str]:
+    """
+    Best-effort read of a string value from a macOS plist. Pure stdlib,
+    read-only, no subprocess/network. Returns None off macOS, when the file
+    is absent, or on any read/parse error. Never raises.
+    """
+    if platform.system() != "Darwin":
+        return None
+    try:
+        with open(plist_path, "rb") as f:
+            info = plistlib.load(f)
+        value = info.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    except Exception:
+        pass
+    return None
 
 
 def _detect_client_version() -> str:
     """
-    Best-effort read of the installed Granola desktop version (macOS
-    Info.plist) so our requests and the token-refresh call advertise a
-    current, unremarkable client version rather than a stale hardcoded one.
-
-    Pure stdlib, read-only, no subprocess/network. Returns the fallback off
-    macOS, when Granola isn't installed, or on any read/parse error. Never
-    raises.
+    The installed Granola desktop version, so requests and the token-refresh
+    call advertise a current, unremarkable client version (this is the value
+    the API keys on) rather than a stale hardcoded one.
     """
-    if platform.system() != "Darwin":
-        return _FALLBACK_CLIENT_VERSION
-    try:
-        with open(_GRANOLA_INFO_PLIST, "rb") as f:
-            info = plistlib.load(f)
-        version = info.get("CFBundleShortVersionString")
-        if isinstance(version, str) and version.strip():
-            return version.strip()
-    except Exception:
-        pass
-    return _FALLBACK_CLIENT_VERSION
+    return _read_plist_string(_GRANOLA_INFO_PLIST, "CFBundleShortVersionString") or _FALLBACK_CLIENT_VERSION
+
+
+def _detect_electron_version() -> str:
+    """
+    The installed Electron framework version, for the User-Agent's Electron
+    token. (Chrome is left hardcoded: it has no clean static source and is
+    low-signal.)
+    """
+    return _read_plist_string(_ELECTRON_INFO_PLIST, "CFBundleVersion") or _FALLBACK_ELECTRON_VERSION
 
 
 API_CONFIG = {
     "API_URL": "https://api.granola.ai/v1",
     "API_URL_V2": "https://api.granola.ai/v2",
     "STREAM_API_URL": "https://stream.api.granola.ai/v1",
-    # Auto-detected from the installed Granola desktop build so requests (and
-    # the token-refresh call) present the current client version; falls back to
-    # a recent known value when detection isn't possible.
+    # Auto-detected from the installed Granola build so requests (and the
+    # token-refresh call) present the current client version; falls back to a
+    # recent known value when detection isn't possible.
     "CLIENT_VERSION": _detect_client_version(),
+    "ELECTRON_VERSION": _detect_electron_version(),
 }
 
 # (connect, read) timeout in seconds for every request. Without this, a stalled
@@ -78,10 +98,11 @@ def get_user_agent() -> str:
     Get the User-Agent string to mimic the Granola desktop app.
     """
     version = API_CONFIG["CLIENT_VERSION"]
+    electron = API_CONFIG["ELECTRON_VERSION"]
     return (
         f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
         f"(KHTML, like Gecko) Granola/{version} Chrome/148.0.7778.265 "
-        f"Electron/42.4.1 Safari/537.36"
+        f"Electron/{electron} Safari/537.36"
     )
 
 

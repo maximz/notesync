@@ -4,7 +4,10 @@ Implements Granola API behaviors compatible with the Granola extension for Rayca
 """
 
 import json
+import platform
+import plistlib
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -24,13 +27,43 @@ from .models import (
 # API configuration aligned with the observed Granola desktop client behavior.
 # ============================================================================
 
+# Fallback client version used off macOS, when Granola isn't installed, or if
+# the app's Info.plist can't be read. Bump occasionally to stay recent.
+_FALLBACK_CLIENT_VERSION = "7.427.8"
+_GRANOLA_INFO_PLIST = Path("/Applications/Granola.app/Contents/Info.plist")
+
+
+def _detect_client_version() -> str:
+    """
+    Best-effort read of the installed Granola desktop version (macOS
+    Info.plist) so our requests and the token-refresh call advertise a
+    current, unremarkable client version rather than a stale hardcoded one.
+
+    Pure stdlib, read-only, no subprocess/network. Returns the fallback off
+    macOS, when Granola isn't installed, or on any read/parse error. Never
+    raises.
+    """
+    if platform.system() != "Darwin":
+        return _FALLBACK_CLIENT_VERSION
+    try:
+        with open(_GRANOLA_INFO_PLIST, "rb") as f:
+            info = plistlib.load(f)
+        version = info.get("CFBundleShortVersionString")
+        if isinstance(version, str) and version.strip():
+            return version.strip()
+    except Exception:
+        pass
+    return _FALLBACK_CLIENT_VERSION
+
+
 API_CONFIG = {
     "API_URL": "https://api.granola.ai/v1",
     "API_URL_V2": "https://api.granola.ai/v2",
     "STREAM_API_URL": "https://stream.api.granola.ai/v1",
-    # Keep aligned with the current Granola desktop build so requests (and the
-    # token-refresh call) present a recent, unremarkable client version.
-    "CLIENT_VERSION": "7.427.8",
+    # Auto-detected from the installed Granola desktop build so requests (and
+    # the token-refresh call) present the current client version; falls back to
+    # a recent known value when detection isn't possible.
+    "CLIENT_VERSION": _detect_client_version(),
 }
 
 # (connect, read) timeout in seconds for every request. Without this, a stalled

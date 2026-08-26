@@ -11,7 +11,7 @@ import os
 import platform
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
@@ -33,10 +33,10 @@ class GranolaAccount:
     """A single Granola account: an identity plus the credentials to act as it."""
 
     email: str
-    access_token: str
+    access_token: str = field(repr=False)
     user_id: Optional[str] = None
-    source: str = "stored-accounts"  # "stored-accounts" or "supabase"
-    refresh_token: Optional[str] = None
+    source: str = "stored-accounts"  # "device-auth", "stored-accounts", or "supabase"
+    refresh_token: Optional[str] = field(default=None, repr=False)
 
 
 def jwt_expires_at(access_token: str) -> Optional[int]:
@@ -305,7 +305,11 @@ class GranolaAuth:
                 try:
                     return safestorage.load_encrypted_json(enc_path)
                 except safestorage.SafeStorageError as e:
-                    sys.stderr.write(f"notesync: could not read {enc_path}: {e}\n")
+                    sys.stderr.write(
+                        f"notesync: legacy desktop credential fallback could not read "
+                        f"{enc_path}: {e}\nRun `notesync auth login` to create an "
+                        "independent CLI session.\n"
+                    )
                     # Fall through to plaintext (present on transitional installs).
             elif not os.path.exists(plain_path):
                 # Encrypted-only store on a platform we can't decrypt: say so,
@@ -364,7 +368,13 @@ class GranolaAuth:
     @staticmethod
     def list_accounts() -> List[GranolaAccount]:
         """
-        Return every Granola account NoteSync can authenticate as.
+        Return every Granola account available to NoteSync.
+
+        CLI-owned, browser-approved device sessions are authoritative. When at
+        least one exists, return only those sessions and do not inspect or
+        rotate Granola Desktop's credential files. This keeps unattended sync
+        independent of the desktop encryption scheme and prevents accidental
+        reuse of the desktop application's single-use refresh-token family.
 
         Reads `stored-accounts.json` first (multi-account layout), then merges
         in the legacy `supabase.json` account. A distinct identity is appended;
@@ -377,6 +387,23 @@ class GranolaAuth:
             FileNotFoundError: If no candidate config file exists on disk.
             ValueError: If a config file exists but no recognizable account is found.
         """
+        # Import lazily to avoid a module cycle: device_auth uses the JWT helpers
+        # above when it decides whether its access token needs refreshing.
+        from .device_auth import list_device_sessions
+
+        device_sessions = list_device_sessions()
+        if device_sessions:
+            return [
+                GranolaAccount(
+                    email=session.email,
+                    access_token=session.access_token,
+                    user_id=session.user_id,
+                    source="device-auth",
+                    refresh_token=None,
+                )
+                for session in device_sessions
+            ]
+
         stored_path = GranolaAuth._get_stored_accounts_path()
         supabase_path = GranolaAuth.get_supabase_config_path()
         candidate_paths = [stored_path, supabase_path]
@@ -405,11 +432,11 @@ class GranolaAuth:
         if not any_file_existed:
             raise FileNotFoundError(
                 f"Granola configuration file not found at any of:\n  - {attempted}\n"
-                "Make sure Granola is installed, running, and that you are logged in to the application."
+                "Run `notesync auth login` to create an independent CLI session."
             )
         raise ValueError(
             f"No Granola accounts found in your local data. Searched:\n  - {attempted}\n"
-            "Make sure Granola is installed, running, and that you are logged in to the application."
+            "Run `notesync auth login` to create an independent CLI session."
         )
 
     @staticmethod

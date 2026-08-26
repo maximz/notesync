@@ -4,6 +4,8 @@ Command-line interface for NoteSync.
 
 import re
 import sys
+import time
+import webbrowser
 from pathlib import Path
 from typing import List, Optional
 
@@ -14,6 +16,15 @@ from rich.table import Table
 from . import __version__
 from .api import GranolaAPI
 from .auth import GranolaAccount, GranolaAuth
+from .device_auth import (
+    DeviceAuthError,
+    delete_device_sessions,
+    device_session_rotation_pending,
+    list_device_sessions,
+    poll_device_token,
+    request_device_code,
+    save_device_session,
+)
 from .export import ExportEngine
 from .sync import SYNC_DB_FILENAME, SyncDatabase
 from .tokens import (
@@ -47,7 +58,7 @@ def _resolve_accounts(account: Optional[str]) -> List[GranolaAccount]:
     """
     try:
         accounts = GranolaAuth.list_accounts()
-    except (FileNotFoundError, ValueError) as e:
+    except (FileNotFoundError, ValueError, DeviceAuthError) as e:
         err_console.print(f"[bold red]Error: {e}[/bold red]")
         sys.exit(1)
 
@@ -102,6 +113,120 @@ def cli():
     Perfect for backing up notes, searching with local tools, or integrating with other systems.
     """
     pass
+
+
+@cli.group("auth")
+def auth_group():
+    """Manage NoteSync's separate, browser-approved Granola session."""
+
+
+@auth_group.command("login")
+@click.option(
+    "--no-browser",
+    is_flag=True,
+    help="Print the approval URL without opening the default browser.",
+)
+def auth_login(no_browser: bool):
+    """Authorize a CLI-owned Granola session for unattended syncs."""
+    try:
+        code = request_device_code()
+        approval_url = code.verification_uri_complete or code.verification_uri
+
+        console.print("[bold]Approve NoteSync's Granola session in your browser.[/bold]")
+        console.print(f"URL: [link={approval_url}]{approval_url}[/link]")
+        console.print(f"Code: [bold cyan]{code.user_code}[/bold cyan]")
+        console.print(
+            "[dim]This creates a separate session; Granola Desktop's token is not read or rotated.[/dim]"
+        )
+
+        if not no_browser:
+            opened = webbrowser.open(approval_url)
+            if not opened:
+                console.print("[yellow]Could not open a browser automatically; use the URL above.[/yellow]")
+
+        with console.status("Waiting for browser approval..."):
+            session = poll_device_token(code)
+        path = save_device_session(session)
+        console.print(f"[bold green]Authorized {session.email}.[/bold green]")
+        console.print(f"[dim]Session stored at {path} with owner-only permissions.[/dim]")
+    except KeyboardInterrupt:
+        err_console.print("[yellow]Authorization cancelled.[/yellow]")
+        raise click.exceptions.Exit(130)
+    except DeviceAuthError as exc:
+        err_console.print(f"[bold red]Authorization failed: {exc}[/bold red]")
+        raise click.exceptions.Exit(1)
+
+
+@auth_group.command("status")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON.")
+def auth_status(output_json: bool):
+    """Show locally stored CLI-owned Granola sessions without refreshing them."""
+    try:
+        sessions = list_device_sessions()
+    except DeviceAuthError as exc:
+        err_console.print(f"[bold red]Session error: {exc}[/bold red]")
+        raise click.exceptions.Exit(1)
+
+    now = time.time()
+    rows = [
+        {
+            "email": session.email,
+            "user_id": session.user_id,
+            "obtained_at": session.obtained_at,
+            "expiry": session.expiry,
+            "access_token_fresh": session.expiry - 60 > now,
+            "rotation_uncertain": device_session_rotation_pending(session.email),
+        }
+        for session in sessions
+    ]
+    if output_json:
+        import json
+
+        click.echo(json.dumps({"count": len(rows), "sessions": rows}))
+        return
+    if not rows:
+        console.print("[yellow]No CLI-owned Granola session. Run `notesync auth login`.[/yellow]")
+        return
+    table = Table(title=f"CLI-owned Granola sessions ({len(rows)})")
+    table.add_column("Email", style="cyan")
+    table.add_column("Access token", style="green")
+    table.add_column("User ID", style="dim")
+    for row in rows:
+        table.add_row(
+            row["email"],
+            (
+                "rotation uncertain"
+                if row["rotation_uncertain"]
+                else "fresh"
+                if row["access_token_fresh"]
+                else "refresh required"
+            ),
+            row["user_id"] or "—",
+        )
+    console.print(table)
+
+
+@auth_group.command("logout")
+@click.option(
+    "--account",
+    type=str,
+    default=None,
+    help="Remove only this account's CLI-owned session (default: all).",
+)
+def auth_logout(account: Optional[str]):
+    """Delete CLI-owned sessions locally; does not revoke them upstream."""
+    try:
+        removed = delete_device_sessions(account)
+    except DeviceAuthError as exc:
+        err_console.print(f"[bold red]Logout failed: {exc}[/bold red]")
+        raise click.exceptions.Exit(1)
+    if not removed:
+        target = f" for {account}" if account else ""
+        console.print(f"[yellow]No CLI-owned Granola session found{target}.[/yellow]")
+        return
+    for email in removed:
+        console.print(f"[green]Removed local CLI session for {email}.[/green]")
+    console.print("[dim]The upstream token was not revoked.[/dim]")
 
 
 @cli.command()

@@ -18,3 +18,4 @@ def _isolate_token_dir(tmp_path, monkeypatch):
     still set NOTESYNC_TOKEN_DIR itself; that override runs after this and wins.
     """
     monkeypatch.setenv("NOTESYNC_TOKEN_DIR", str(tmp_path / "notesync-token-store"))
+    monkeypatch.setenv("NOTESYNC_SESSION_DIR", str(tmp_path / "notesync-sessions"))

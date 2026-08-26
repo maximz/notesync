@@ -144,7 +144,7 @@ def refresh_access_token(refresh_token: str) -> dict:
         "Accept": "application/json",
         "User-Agent": get_user_agent(),
         "X-Client-Version": API_CONFIG["CLIENT_VERSION"],
-        "X-Granola-Platform": "macos",
+        "X-Granola-Platform": "darwin",
     }
     body = {"refresh_token": refresh_token}
 
@@ -225,6 +225,26 @@ def get_access_token_for(account: "GranolaAccount") -> str:
 
     Raises ``TokenRefreshError`` if no refresh path is available or the endpoint fails.
     """
+    if account.source == "device-auth":
+        # The device session is authoritative and has its own owner-only,
+        # rotation-safe persistence. Never copy its refresh token into the
+        # legacy cache that was bootstrapped from Granola Desktop.
+        from .device_auth import (
+            DeviceSessionDead,
+            DeviceSessionPersistError,
+            DeviceSessionTransient,
+            get_device_access_token,
+        )
+
+        try:
+            return get_device_access_token(account.email)
+        except DeviceSessionPersistError as exc:
+            raise TokenPersistError(str(exc)) from exc
+        except DeviceSessionTransient as exc:
+            raise TokenRefreshTransient(str(exc)) from exc
+        except DeviceSessionDead as exc:
+            raise TokenRefreshDead(str(exc)) from exc
+
     subdir = _account_subdir(account.email)
     store_path = _token_store_path(subdir)
 

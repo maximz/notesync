@@ -73,3 +73,27 @@ def test_get_user_agent_includes_detected_versions():
     ua = api.get_user_agent()
     assert f"Granola/{api.API_CONFIG['CLIENT_VERSION']}" in ua
     assert f"Electron/{api.API_CONFIG['ELECTRON_VERSION']}" in ua
+
+
+def test_api_headers_match_internal_client_contract():
+    client = api.GranolaAPI("secret-token")
+    headers = client._get_headers()
+
+    assert headers["Authorization"] == "Bearer secret-token"
+    assert headers["Accept"] == "application/json"
+    assert headers["Accept-Encoding"] == "gzip, deflate"
+    assert headers["X-Client-Version"] == api.API_CONFIG["CLIENT_VERSION"]
+    assert headers["X-Granola-Platform"] == "darwin"
+    assert "notesync" not in headers["User-Agent"].lower()
+
+
+def test_adaptive_rate_limiter_halves_after_429():
+    limiter = api.AdaptiveRateLimiter(2.0)
+    assert limiter.rate == 2.0
+    limiter.on_rate_limit()
+    assert limiter.rate == 1.0
+    limiter.on_rate_limit()
+    assert limiter.rate == 0.5
+    limiter.on_rate_limit()
+    limiter.on_rate_limit()
+    assert limiter.rate == api.MIN_INTERNAL_API_RATE

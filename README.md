@@ -20,13 +20,15 @@ A Python CLI tool inspired by the Granola extension for Raycast, designed for re
 - **Smart Re-sync**: Automatically re-exports recently ended meetings to capture complete transcripts
 - **Efficient**: Tracks sync state in SQLite to avoid unnecessary re-exports
 - **Progress Tracking**: Rich terminal progress output with status updates
+- **Independent Authentication**: Browser-approved CLI session that never borrows or rotates Granola Desktop's token
+- **Conservative API Use**: Sequential requests paced at 2 requests/second with automatic slowdown on rate limits
 
 ## Installation
 
 ### Prerequisites
 
 - Python 3.11 or higher
-- [Granola desktop app](https://www.granola.ai/) installed and logged in
+- A Granola account you can approve in a browser
 - [uv](https://docs.astral.sh/uv/) package manager
 
 ### Install uv (if not already installed)
@@ -48,13 +50,23 @@ uv sync
 uv run notesync --version
 ```
 
-### First run on macOS: Keychain access
+### First run: authorize NoteSync's own session
 
-Recent Granola builds encrypt their local token store. The first command that reads it triggers a one-time macOS Keychain prompt for `Granola Safe Storage` — click **Always Allow** so later runs don't reprompt. Decryption is read-only and never touches Granola's auth flow. Note: scheduled syncs on macOS must run from a launchd LaunchAgent, not plain `cron`, which can't reach the login Keychain (see the automation sections below). See [Authentication](#authentication) for details.
+Current Granola builds keep the desktop credential store behind an app-specific macOS entitlement. NoteSync therefore uses a separate browser-approved device session instead of borrowing Granola Desktop's token:
+
+```bash
+uv run notesync auth login
+uv run notesync auth status
+```
+
+Approve the displayed Granola page once. The resulting session is stored under `~/.local/share/notesync/sessions/` in a mode-`0700` directory with mode-`0600` files. Scheduled runs refresh only this CLI-owned token family. See [Authentication](#authentication) for details.
 
 ## Quick Start
 
 ```bash
+# Create the independent CLI session once
+uv run notesync auth login
+
 # Export all notes to a directory
 mkdir -p ~/Dropbox/notesync_notes
 uv run notesync sync ~/Dropbox/notesync_notes
@@ -385,7 +397,7 @@ chmod +x ~/bin/sync_notesync.sh
 
 #### 5. Schedule the Sync
 
-> **macOS + recent Granola (encrypted store):** plain `cron` jobs run outside your login session and **cannot read the login Keychain**, so they can't decrypt Granola's tokens — the sync fails or falls back to stale plaintext. Use a **launchd LaunchAgent** instead (it runs in your login session). Run the script once manually first and click **Always Allow** on the `Granola Safe Storage` prompt, then:
+The browser-approved CLI session is stored in ordinary owner-only files, so the job no longer depends on access to Granola's protected Keychain item. A launchd LaunchAgent remains the recommended macOS scheduler because it has a predictable user environment.
 >
 > ```xml
 > <!-- ~/Library/LaunchAgents/com.example.notesync.plist -->
@@ -399,7 +411,7 @@ chmod +x ~/bin/sync_notesync.sh
 > </dict></plist>
 > ```
 >
-> Load it with `launchctl load ~/Library/LaunchAgents/com.example.notesync.plist`. The plain-cron setup below is fine on Linux, or on macOS with older (plaintext) Granola builds.
+> Load it with `launchctl load ~/Library/LaunchAgents/com.example.notesync.plist`. Once `notesync auth login` has created the CLI session, the plain-cron setup below can also authenticate; launchd is still preferred on macOS for its predictable user environment.
 
 Add the sync script to cron:
 
@@ -551,7 +563,7 @@ The per-account `.notesync-sync.db` files exist locally but are ignored by Git, 
 
 Use this if you only want periodic local exports and do not want automatic git commit/push.
 
-> **macOS + recent Granola:** as above, plain `cron` can't decrypt the Keychain-protected store — schedule via a launchd LaunchAgent instead (see [Schedule the Sync](#5-schedule-the-sync)). The crontab below applies to Linux or older (plaintext) Granola builds.
+Run `notesync auth login` interactively once before enabling an unattended schedule. The crontab below can then use the CLI-owned session without reading Granola Desktop's Keychain data.
 
 ```bash
 # Find the absolute binary path once
@@ -651,24 +663,27 @@ Attendee information includes:
 
 ### Authentication
 
-NoteSync reads authentication credentials from the Granola desktop app's local configuration. It checks two files, preferring the newer multi-account file when both are present:
+The preferred authentication path is a separate, browser-approved device session:
 
-- `stored-accounts.json` (recent Granola builds, one entry per signed-in account)
-- `supabase.json` (legacy single-account layout)
+```bash
+notesync auth login           # open the approval page and save a session
+notesync auth status          # inspect local session metadata; never refreshes
+notesync auth logout          # remove every local CLI-owned session
+notesync auth logout --account user@example.com
+```
 
-**Encrypted store (recent Granola builds, macOS):** newer Granola versions encrypt these files (`stored-accounts.json.enc`, `supabase.json.enc`) and stop updating the plaintext copies. NoteSync transparently decrypts them using Granola's own key from the macOS Keychain (a `storage.dek` data key unwrapped via the `Granola Safe Storage` Keychain entry, then AES-256-GCM), preferring the `.enc` files over any stale plaintext. The first run triggers a one-time Keychain prompt — click **Always Allow** so later runs don't reprompt. Decryption is read-only and never refreshes or rotates tokens, so it can't sign your desktop app out. Falls back to plaintext on older Granola builds or non-macOS platforms. This requires the `cryptography` package, installed automatically with NoteSync.
+Each approval creates a token family owned by NoteSync. It does not read, copy, or rotate Granola Desktop's single-use refresh token. Token rotations are serialized per account and written atomically. If a refresh response is lost or the rotated token cannot be saved, NoteSync records an interrupted-rotation marker and refuses to retry until `notesync auth login` creates a replacement session.
 
-Per platform:
+The session directory defaults to:
 
-- **macOS**: `~/Library/Application Support/Granola/`
-- **Linux**: `~/.config/Granola/` (stored-accounts.json) or `~/Library/Application Support/Granola/` (supabase.json)
-- **Windows**: `%APPDATA%\Granola\`
+- **macOS/Linux**: `~/.local/share/notesync/sessions/`
+- Tests and isolated deployments can override it with `NOTESYNC_SESSION_DIR`.
 
-No separate login required — as long as you're signed into Granola in the desktop app, the CLI picks up the credentials. If you're signed into multiple accounts, each one is synced into its own subdirectory (see [Multiple accounts](#multiple-accounts) below).
+When one or more CLI-owned sessions exist, they are authoritative and NoteSync does not inspect Granola Desktop's credential files. On older Granola installations with no CLI-owned session, the legacy plaintext/`storage.dek` discovery path remains available as a compatibility fallback. Current entitlement-gated Granola builds require `notesync auth login`.
 
 ### Multiple accounts
 
-By default, `notesync sync OUTPUT_DIR` syncs every account in `stored-accounts.json` into its own subdirectory, sanitized from the email address:
+Run `notesync auth login` once for each Granola account you want to sync. By default, `notesync sync OUTPUT_DIR` syncs every CLI-owned session into its own subdirectory, sanitized from the email address:
 
 ```
 OUTPUT_DIR/
@@ -713,7 +728,7 @@ This makes frequent syncs very efficient while ensuring transcripts are complete
 
 ### API Compatibility
 
-The CLI is behaviorally compatible with the same Granola API endpoints used by the Granola extension for Raycast:
+The CLI uses Granola's internal application endpoints. Requests are sequential, paced conservatively at two requests per second, automatically slowed after HTTP 429, and retried with bounded backoff:
 
 - `GET /v2/get-documents` - Fetch all notes
 - `POST /v1/get-document-transcript` - Fetch transcript for a note
@@ -724,30 +739,29 @@ The CLI is behaviorally compatible with the same Granola API endpoints used by t
 
 ### "Granola configuration file not found"
 
-**Cause**: The Granola desktop app is not installed or you're not logged in.
+**Cause**: No CLI-owned device session or usable legacy desktop credentials were found.
 
 **Solution**:
-1. Install the [Granola desktop app](https://www.granola.ai/)
-2. Launch Granola and log in
-3. Try running the CLI again
+1. Run `notesync auth login` interactively.
+2. Approve the displayed Granola page.
+3. Confirm with `notesync auth status`, then retry the sync.
 
 ### "Access token not found"
 
-**Cause**: The authentication file exists but doesn't contain a valid token.
+**Cause**: A legacy desktop authentication file exists but contains no usable token.
 
 **Solution**:
-1. Make sure you're logged into Granola
-2. Try logging out and logging back in
-3. Check that Granola is running
+1. Run `notesync auth login` to create an independent session.
+2. Confirm it with `notesync auth status`.
 
 ### "could not read ...stored-accounts.json.enc" / repeated Keychain prompts
 
-**Cause**: Granola's encrypted store needs macOS Keychain access that wasn't granted (or only "Allow", not "Always Allow", was clicked).
+**Cause**: NoteSync fell back to legacy desktop credential discovery because no CLI-owned session exists. Current Granola builds protect the encryption key with an app-specific entitlement that third-party processes cannot use.
 
 **Solution**:
-1. Run `notesync accounts` and click **Always Allow** on the `Granola Safe Storage` dialog.
-2. For automation, run the job in your login session (e.g. a launchd LaunchAgent), not plain cron — plain cron can't reach the login Keychain.
-3. If a token shows expired even after decrypting, open Granola briefly so it refreshes — notesync only reads tokens, it never refreshes them.
+1. Run `notesync auth login`.
+2. Confirm with `notesync accounts`; its source column should say `device-auth`.
+3. Retry the scheduled command. It will no longer read the protected desktop store.
 
 ### "Failed to fetch documents"
 

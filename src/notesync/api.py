@@ -6,6 +6,7 @@ Implements Granola API behaviors compatible with the Granola extension for Rayca
 import json
 import platform
 import plistlib
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -91,6 +92,8 @@ API_CONFIG = {
 # scheduled granola sync for days. Bounds each attempt so retries/backoff and
 # the outer cron timeout can do their job.
 DEFAULT_REQUEST_TIMEOUT = (10, 60)
+DEFAULT_INTERNAL_API_RATE = 2.0
+MIN_INTERNAL_API_RATE = 0.25
 
 
 def get_user_agent() -> str:
@@ -111,13 +114,51 @@ def get_user_agent() -> str:
 # ============================================================================
 
 
+class AdaptiveRateLimiter:
+    """Conservative per-client pacing with automatic slowdown after HTTP 429."""
+
+    def __init__(self, rate: float = DEFAULT_INTERNAL_API_RATE):
+        self._rate = max(MIN_INTERNAL_API_RATE, float(rate))
+        self._next_request_at = 0.0
+        self._lock = threading.Lock()
+
+    @property
+    def rate(self) -> float:
+        with self._lock:
+            return self._rate
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            delay = max(0.0, self._next_request_at - now)
+            slot = max(now, self._next_request_at)
+            self._next_request_at = slot + (1.0 / self._rate)
+        if delay > 0:
+            time.sleep(delay)
+
+    def on_rate_limit(self) -> None:
+        with self._lock:
+            self._rate = max(MIN_INTERNAL_API_RATE, self._rate / 2.0)
+
+
+def _retry_after_seconds(response: requests.Response) -> float:
+    try:
+        return max(0.0, min(float(response.headers.get("Retry-After", "0")), 60.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class GranolaAPI:
     """
     API client for Granola.
     Uses behavior-compatible request and parsing logic.
     """
 
-    def __init__(self, access_token: str):
+    def __init__(
+        self,
+        access_token: str,
+        rate_limit: float = DEFAULT_INTERNAL_API_RATE,
+    ):
         """
         Initialize the API client.
 
@@ -135,6 +176,7 @@ class GranolaAPI:
             )
         self.access_token = access_token
         self.session = requests.Session()
+        self.rate_limiter = AdaptiveRateLimiter(rate_limit)
         self._setup_session()
 
     def _setup_session(self):
@@ -154,8 +196,11 @@ class GranolaAPI:
         headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip, deflate",
             "User-Agent": get_user_agent(),
             "X-Client-Version": API_CONFIG["CLIENT_VERSION"],
+            "X-Granola-Platform": "darwin",
         }
 
         if extra_headers:
@@ -230,6 +275,7 @@ class GranolaAPI:
 
         for attempt in range(max_retries):
             try:
+                self.rate_limiter.wait()
                 response = self.session.request(method, url, **kwargs)
                 response.raise_for_status()
                 return response
@@ -237,13 +283,18 @@ class GranolaAPI:
                 last_exception = e
 
                 # Don't retry on client errors (4xx) except 429 (rate limit)
-                if hasattr(e, "response") and e.response is not None:
-                    if 400 <= e.response.status_code < 500 and e.response.status_code != 429:
+                response = getattr(e, "response", None)
+                if response is not None:
+                    if 400 <= response.status_code < 500 and response.status_code != 429:
                         raise
+                    if response.status_code == 429:
+                        self.rate_limiter.on_rate_limit()
 
-                # Exponential backoff: 1s, 2s, 4s
+                # Exponential backoff, while honoring a bounded Retry-After.
                 if attempt < max_retries - 1:
-                    wait_time = 2**attempt
+                    wait_time = float(2**attempt)
+                    if response is not None and response.status_code == 429:
+                        wait_time = max(wait_time, _retry_after_seconds(response))
                     time.sleep(wait_time)
 
         # All retries failed

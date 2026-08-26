@@ -206,7 +206,7 @@ def test_refresh_access_token_request_shape():
     assert kwargs["json"] == {"refresh_token": "my-rt"}
     headers = kwargs["headers"]
     assert not any(k.lower() == "authorization" for k in headers)
-    assert headers["X-Granola-Platform"] == "macos"
+    assert headers["X-Granola-Platform"] == "darwin"
 
 
 def test_refresh_access_token_429_then_success_retries():

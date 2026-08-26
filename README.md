@@ -672,7 +672,7 @@ notesync auth logout          # remove every local CLI-owned session
 notesync auth logout --account user@example.com
 ```
 
-Each approval creates a token family owned by NoteSync. It does not read, copy, or rotate Granola Desktop's single-use refresh token. Token rotations are serialized per account and written atomically. If a refresh response is lost or the rotated token cannot be saved, NoteSync records an interrupted-rotation marker and refuses to retry until `notesync auth login` creates a replacement session.
+Each approval creates a token family owned by NoteSync. It does not read, copy, or rotate Granola Desktop's single-use refresh token. Token rotations are serialized per account and written atomically. DNS, connection-establishment, and connect-timeout failures happen before the refresh request is sent, so NoteSync clears its safety marker and retries on the next scheduled run. If a response is lost after the request may have been sent, or the rotated token cannot be saved, NoteSync records an interrupted-rotation marker and refuses to replay the possibly consumed token until `notesync auth login` creates a replacement session.
 
 The session directory defaults to:
 

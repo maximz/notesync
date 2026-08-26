@@ -1,10 +1,12 @@
 import json
 import os
+import socket
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 from click.testing import CliRunner
 
 from notesync.auth import GranolaAuth
@@ -204,6 +206,45 @@ def test_ambiguous_refresh_failure_leaves_rotation_marker_and_blocks_retry():
         with pytest.raises(DeviceSessionPersistError, match="interrupted token rotation"):
             get_device_access_token("person@example.com")
     post.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "error, expected_type",
+    [
+        (requests.ConnectTimeout("connect timed out"), "ConnectTimeout"),
+        (
+            requests.ConnectionError(socket.gaierror(-2, "name resolution failed")),
+            "gaierror",
+        ),
+    ],
+)
+def test_pre_send_refresh_failure_is_retryable_and_clears_marker(
+    error: requests.RequestException, expected_type: str
+):
+    save_device_session(_session(expiry=1))
+
+    with patch("notesync.device_auth.requests.post", side_effect=error):
+        with pytest.raises(
+            DeviceSessionTransient,
+            match="failed before the request was sent",
+        ) as raised:
+            get_device_access_token("person@example.com")
+
+    assert expected_type in str(raised.value)
+    assert not _rotation_path("person@example.com").exists()
+
+
+def test_read_timeout_remains_ambiguous_and_preserves_marker():
+    save_device_session(_session(expiry=1))
+
+    with patch(
+        "notesync.device_auth.requests.post",
+        side_effect=requests.ReadTimeout("response timed out"),
+    ):
+        with pytest.raises(DeviceSessionPersistError, match="ReadTimeout"):
+            get_device_access_token("person@example.com")
+
+    assert _rotation_path("person@example.com").exists()
 
 
 def test_rate_limited_refresh_removes_rotation_marker_for_safe_retry():

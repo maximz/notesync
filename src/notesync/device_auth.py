@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import socket
 import stat
 import tempfile
 import time
@@ -387,7 +388,76 @@ def _session_is_expired(session: DeviceSession) -> bool:
 
 
 class _KnownUnspentRefreshFailure(DeviceSessionTransient):
-    """The server explicitly rejected the request before consuming the token."""
+    """A refresh failure known not to have consumed the token."""
+
+
+def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
+    """Walk wrapped transport errors without depending on urllib3 internals."""
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop(0)
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+
+        wrapped = (
+            current.__cause__,
+            current.__context__,
+            getattr(current, "reason", None),
+            *current.args,
+        )
+        pending.extend(
+            candidate
+            for candidate in wrapped
+            if isinstance(candidate, BaseException) and id(candidate) not in seen
+        )
+
+
+def _transport_failure_summary(exc: requests.RequestException) -> str:
+    """Return token-free exception types and the innermost transport detail."""
+    chain = list(_exception_chain(exc))
+    type_names = list(dict.fromkeys(type(item).__name__ for item in chain))
+    detail = str(chain[-1]).replace("\n", " ")[:240]
+    summary = " -> ".join(type_names)
+    return f"{summary}: {detail}" if detail else summary
+
+
+def _refresh_was_definitely_not_sent(exc: requests.RequestException) -> bool:
+    """True only for failures known to happen before an HTTP request is sent.
+
+    Requests documents ``ConnectTimeout`` as safe to retry. DNS resolution and
+    TCP connection establishment errors are likewise pre-request. Read timeouts,
+    generic connection drops, proxy failures, and TLS errors remain ambiguous.
+    urllib3 exception names are checked by name so Notesync remains compatible
+    with both urllib3 1.x and 2.x supported by Requests.
+    """
+    if isinstance(exc, requests.exceptions.ReadTimeout):
+        return False
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return True
+    if isinstance(
+        exc,
+        (
+            requests.exceptions.InvalidSchema,
+            requests.exceptions.InvalidURL,
+            requests.exceptions.MissingSchema,
+        ),
+    ):
+        return True
+
+    pre_send_type_names = {
+        "ConnectTimeoutError",
+        "NameResolutionError",
+        "NewConnectionError",
+    }
+    for item in _exception_chain(exc):
+        if isinstance(item, (socket.gaierror, ConnectionRefusedError)):
+            return True
+        if type(item).__name__ in pre_send_type_names:
+            return True
+    return False
 
 
 def _refresh_device_session(session: DeviceSession) -> DeviceSession:
@@ -401,8 +471,15 @@ def _refresh_device_session(session: DeviceSession) -> DeviceSession:
             timeout=DEFAULT_REQUEST_TIMEOUT,
         )
     except requests.RequestException as exc:
+        detail = _transport_failure_summary(exc)
+        if _refresh_was_definitely_not_sent(exc):
+            raise _KnownUnspentRefreshFailure(
+                "Granola refresh failed before the request was sent; the token remains "
+                f"safe to retry on the next run ({detail})"
+            ) from exc
         raise DeviceSessionPersistError(
-            "refresh response was lost; token rotation is uncertain. Run notesync auth login before retrying"
+            "refresh response was lost after the request may have been sent; token rotation "
+            f"is uncertain ({detail}). Run notesync auth login before retrying"
         ) from exc
 
     body_text = response.text or ""

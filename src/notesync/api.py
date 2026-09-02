@@ -308,7 +308,7 @@ class GranolaAPI:
         """
         Fetch all documents (notes) from Granola.
 
-        GET /v2/get-documents
+        POST /v2/get-documents
 
         Returns:
             GetDocumentsResponse with docs and deleted lists
@@ -319,7 +319,7 @@ class GranolaAPI:
         url = f"{API_CONFIG['API_URL_V2']}/get-documents"
 
         try:
-            response = self._retry_request("GET", url)
+            response = self._retry_request("POST", url)
             data = self._handle_response(response, "Get documents")
             return GetDocumentsResponse(**data)
         except Exception as e:

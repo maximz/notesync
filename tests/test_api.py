@@ -87,6 +87,31 @@ def test_api_headers_match_internal_client_contract():
     assert "notesync" not in headers["User-Agent"].lower()
 
 
+def test_get_documents_posts_to_v2_endpoint(monkeypatch):
+    client = api.GranolaAPI("secret-token")
+    response = object()
+    calls = []
+
+    def fake_retry_request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return response
+
+    monkeypatch.setattr(client, "_retry_request", fake_retry_request)
+    monkeypatch.setattr(
+        client,
+        "_handle_response",
+        lambda actual_response, operation: {"docs": [], "deleted": []},
+    )
+
+    result = client.get_documents()
+
+    assert result.docs == []
+    assert result.deleted == []
+    assert calls == [
+        ("POST", f"{api.API_CONFIG['API_URL_V2']}/get-documents", {})
+    ]
+
+
 def test_adaptive_rate_limiter_halves_after_429():
     limiter = api.AdaptiveRateLimiter(2.0)
     assert limiter.rate == 2.0
